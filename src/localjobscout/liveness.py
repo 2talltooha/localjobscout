@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from dataclasses import dataclass
 
 import httpx
@@ -48,12 +49,18 @@ _DEAD_PHRASES: tuple[str, ...] = (
     "position you are looking for",
 )
 
-# Sources whose raw HTTP responses we trust to signal liveness.
+# Sources whose raw HTTP responses we trust to signal liveness. iCIMS hospital
+# portals (source ids ending "_icims") are also verifiable — handled below.
 _VERIFIABLE_SOURCES: frozenset[str] = frozenset(
-    {"adzuna", "linkedin", "remoteok", "jobbank"}
+    {"adzuna", "linkedin", "remoteok", "jobbank", "talent"}
 )
 # Sources we cannot check from a plain client (anti-bot / misleading markup).
+# Indeed is handled out-of-band by indeed_live.py (Playwright).
 _UNVERIFIABLE_SOURCES: frozenset[str] = frozenset({"indeed"})
+
+
+def _is_verifiable(source: str) -> bool:
+    return source in _VERIFIABLE_SOURCES or source.endswith("_icims")
 
 _UA = {
     "User-Agent": (
@@ -104,17 +111,29 @@ def verify(url: str, source: str, *, timeout: float = 12.0) -> Liveness:
         return Liveness("unknown", "no url")
     if source in _UNVERIFIABLE_SOURCES:
         return Liveness("unknown", f"{source} blocks verification")
+    if not _is_verifiable(source):
+        return Liveness("unknown", f"{source} not verifiable")
 
     try:
         with httpx.Client(
             follow_redirects=True, timeout=timeout, headers=_UA
         ) as client:
             resp = client.get(url)
+            # Rate-limit / method quirks (common on iCIMS under load) are
+            # transient — retry once after a short pause before judging.
+            if resp.status_code in (405, 429):
+                time.sleep(1.3)
+                resp = client.get(url)
     except httpx.HTTPError as exc:
         return Liveness("unknown", f"fetch error: {type(exc).__name__}")
 
     if resp.status_code in (404, 410):
         return Liveness("dead", f"HTTP {resp.status_code}")
+    # iCIMS refuses the bare liveness GET (405) but returns 404/410 for genuinely
+    # removed jobs — so any non-gone status means the posting still exists.
+    # Descriptions are already enriched at scrape time, so no body fetch needed.
+    if source.endswith("_icims"):
+        return Liveness("live", f"HTTP {resp.status_code} (icims)")
     if resp.status_code == 403:
         # Blocked — cannot read the page to judge.
         return Liveness("unknown", "HTTP 403 (blocked)")

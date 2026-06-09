@@ -27,6 +27,7 @@ from localjobscout.scrapers.cambridge import CambridgeScraper
 from localjobscout.scrapers.conestoga import ConestogaScraper
 from localjobscout.scrapers.grandriver import GrandRiverScraper
 from localjobscout.scrapers.hamiltonhealth import HamiltonHealthScraper
+from localjobscout.scrapers.icims import ICIMSScraper
 from localjobscout.scrapers.indeed_pw import IndeedPlaywrightScraper
 from localjobscout.scrapers.jobbank import JobBankScraper
 from localjobscout.scrapers.laurier import LaurierScraper
@@ -122,6 +123,17 @@ def _make_scrapers(settings: Settings) -> list[Scraper]:
         scrapers.append(
             CambridgeScraper(max_pages=settings.scrapers.cambridge.max_pages)
         )
+    for site in settings.scrapers.icims_sites:
+        if site.enabled:
+            scrapers.append(
+                ICIMSScraper(
+                    name=site.name,
+                    subdomain=site.subdomain,
+                    company=site.company,
+                    city=site.city,
+                    max_pages=site.max_pages,
+                )
+            )
     if settings.scrapers.talent.enabled:
         scrapers.append(
             TalentScraper(

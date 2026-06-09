@@ -1070,18 +1070,42 @@ def _verify_and_enrich_queue(
     full posting body and re-run suitability so domain mismatches hidden by the
     truncation get filtered.
 
-    Indeed cannot be checked (Cloudflare blocks both liveness and full-text
-    fetch), so its jobs pass through tagged "unverified" — the caller flags them
-    so the user knows to confirm closure + requirements manually.
+    Indeed is verified separately in one batched Playwright pass (it renders its
+    apply button via JS behind Cloudflare): loaded pages give a real live/closed
+    verdict; Cloudflare-blocked ones fall back to "unverified".
 
     Returns (surviving jobs, {job_id: "live"|"unverified"})."""
     from localjobscout.auto_apply import check_suitability
+    from localjobscout.indeed_live import verify_indeed_batch
     from localjobscout.liveness import verify as verify_live
+
+    # Pre-verify Indeed jobs with one browser session. Capped tighter than the
+    # httpx limit because each Playwright load is ~6s.
+    indeed_cap = min(limit, 8)
+    indeed_jobs = [j for j in jobs if j.source == "indeed"][:indeed_cap]
+    indeed_verdicts = verify_indeed_batch(
+        [j.url for j in indeed_jobs], limit=indeed_cap
+    )
 
     kept: list[Job] = []
     confidence: dict[str, str] = {}
     checked = 0
     for job in jobs:
+        # ── Indeed: use the Playwright verdict ───────────────────────────────
+        if job.source == "indeed":
+            v = indeed_verdicts.get(job.url)
+            if v is not None and v.state == "dead":
+                db_module.update_application_status(job.id, "hidden")
+                console.print(
+                    f"[dim]hidden (closed/greyed): {job.title[:44]} — "
+                    f"{v.reason}[/dim]"
+                )
+                continue
+            confidence[job.id] = "live" if (v and v.state == "live") else "unverified"
+            kept.append(job)
+            continue
+
+        # ── Verifiable sources: httpx live-check + full-text enrichment ───────
         if checked >= limit:
             kept.append(job)
             confidence[job.id] = "unverified"

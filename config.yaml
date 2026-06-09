@@ -110,6 +110,15 @@ scrapers:
     query: "healthcare assistant pharmacy clinical research"
     locations:
       - "Waterloo, ON"
+  # Hospital iCIMS portals (server-rendered, httpx-scrapable). Add a site by
+  # opening the hospital careers page and copying its iCIMS subdomain.
+  icims_sites:
+    - name: "cambridge_icims"
+      subdomain: "encareers-cmh"
+      company: "Cambridge Memorial Hospital"
+      city: "Cambridge"
+      max_pages: 3
+      enabled: true
 
 prefilter:
   exclude_phrases:

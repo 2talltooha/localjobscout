@@ -24,6 +24,18 @@ class ScraperConfig(BaseModel):
     locations: list[str] = []
 
 
+class ICIMSSite(BaseModel):
+    """One hospital/employer on the iCIMS ATS. Find `subdomain` by opening the
+    employer's careers page and reading the iCIMS link
+    (e.g. encareers-cmh.icims.com → subdomain "encareers-cmh")."""
+    enabled: bool = True
+    name: str                 # unique source id, e.g. "cambridge"
+    subdomain: str            # e.g. "encareers-cmh"
+    company: str              # display name
+    city: str                 # location city (province assumed ON)
+    max_pages: int = 3
+
+
 class ScrapersConfig(BaseModel):
     jobbank: ScraperConfig = Field(default_factory=ScraperConfig)
     remoteok: ScraperConfig = Field(default_factory=ScraperConfig)
@@ -49,6 +61,8 @@ class ScrapersConfig(BaseModel):
     talent: ScraperConfig = Field(
         default_factory=lambda: ScraperConfig(enabled=False)
     )
+    # Hospital/employer iCIMS portals (server-rendered, httpx-scrapable).
+    icims_sites: list[ICIMSSite] = []
 
 
 class FocusConfig(BaseModel):
