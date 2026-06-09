@@ -364,6 +364,20 @@ Applied before `make_job_id()` so the same job gets a stable id across scrape ru
 
 ---
 
+## Chat Display Conventions (Taha's preferences)
+
+After any scan or when asked for results, show a **top-5 markdown chart** in
+chat with columns: `# | Score | Job | Employer | Notes | Apply` — the Apply
+column is a markdown link to the posting URL. Mention jobs hidden by the
+qualification gate below the chart.
+
+When Taha says **"5 more"**, show the next 5 ranked jobs from the DB
+(same filters: check_suitability + qualification_verdict != 'no', combined
+score order, skip already-shown ranks). Dig below match_threshold if the
+queue is exhausted, flagging that those are lower-confidence.
+
+---
+
 ## Scheduled Automation (Windows Task Scheduler)
 
 Task **"LocalJobScout Scan"** runs hourly while Taha is logged in:

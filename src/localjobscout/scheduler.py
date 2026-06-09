@@ -238,6 +238,13 @@ def _run_auto_tailor(settings: Settings) -> int:
 
     master_hash = master.master_hash()
     candidates = db.get_manual_queue_jobs(settings.match_threshold)
+    # Skip jobs the suitability/qualification gates would hide from the queue —
+    # tailoring them wastes one LLM call each (e.g. RPN postings).
+    from localjobscout.auto_apply import check_suitability
+    candidates = [
+        j for j in candidates
+        if j.qualification_verdict != "no" and check_suitability(j).ok
+    ]
     candidates = sorted(
         candidates, key=lambda j: j.score or 0.0, reverse=True
     )[: max(0, settings.tailor.top_n)]
