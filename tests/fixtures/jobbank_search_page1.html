@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Job Bank Search</title></head>
+<body>
+<main>
+<section id="searchResults">
+
+<!-- Card 1: complete card -->
+<article>
+  <a class="resultJobItem" href="/en/job/software-developer-123456">
+    <span class="noctitle">Software Developer</span>
+    <span class="business">Acme Corp</span>
+    <span class="location">Waterloo, ON</span>
+  </a>
+</article>
+
+<!-- Card 2: missing .business (empty company is fine) -->
+<article>
+  <a class="resultJobItem" href="/en/job/data-analyst-789012">
+    <span class="noctitle">Data Analyst</span>
+    <span class="location">Kitchener, ON</span>
+  </a>
+</article>
+
+<!-- Card 3: missing href — should be skipped -->
+<article>
+  <a class="resultJobItem">
+    <span class="noctitle">Ghost Posting</span>
+    <span class="business">Nobody Inc</span>
+    <span class="location">Cambridge, ON</span>
+  </a>
+</article>
+
+</section>
+</main>
+</body>
+</html>

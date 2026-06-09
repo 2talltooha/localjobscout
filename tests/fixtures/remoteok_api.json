@@ -1,0 +1,62 @@
+[
+  {"legal": "By accessing RemoteOK you agree to its terms and conditions."},
+  {
+    "id": "1001",
+    "position": "Senior Python Developer",
+    "company": "CanadaCo",
+    "url": "https://remoteok.com/jobs/1001",
+    "description": "<p>Build Python services</p>",
+    "date": "2025-11-01T00:00:00Z",
+    "tags": ["python"],
+    "location": "Canada"
+  },
+  {
+    "id": "1002",
+    "position": "Frontend Engineer",
+    "company": "GlobalCo",
+    "url": "https://remoteok.com/jobs/1002",
+    "description": "<p>React developer needed</p>",
+    "date": "2025-11-02T00:00:00Z",
+    "location": "Worldwide"
+  },
+  {
+    "id": "1003",
+    "position": "US Backend Dev",
+    "company": "USOnlyCo",
+    "url": "https://remoteok.com/jobs/1003",
+    "description": "<p>US residents only</p>",
+    "date": "2025-11-03T00:00:00Z",
+    "location": "United States only"
+  },
+  {
+    "id": "1004",
+    "company": "MissingTitle",
+    "url": "https://remoteok.com/jobs/1004",
+    "description": "<p>No position field</p>",
+    "location": "Canada"
+  },
+  {
+    "id": "1005",
+    "position": "No URL Engineer",
+    "company": "MissingURL",
+    "description": "<p>No url field</p>",
+    "location": "Canada"
+  },
+  {
+    "id": "1006",
+    "position": "No Location Dev",
+    "company": "AnywhereInc",
+    "url": "https://remoteok.com/jobs/1006",
+    "description": "<p>No location provided</p>",
+    "date": "2025-11-06T00:00:00Z"
+  },
+  {
+    "id": "1007",
+    "position": "HTML Stripper Role",
+    "company": "TaglessLtd",
+    "url": "https://remoteok.com/jobs/1007",
+    "description": "<h1>Requirements</h1><ul><li>Five years exp</li><li>Strong Python</li></ul>",
+    "date": "2025-11-07T00:00:00Z",
+    "location": "Anywhere"
+  }
+]

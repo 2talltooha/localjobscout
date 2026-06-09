@@ -1,0 +1,5 @@
+# Allow all bots
+User-agent: *
+Allow: /
+
+Sitemap: https://www.conestogac.on.ca/sitemap.xml

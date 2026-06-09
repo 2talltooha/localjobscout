@@ -1,0 +1,229 @@
+location: "Waterloo, ON"
+match_threshold: 0.07          # premed jobs score low after relevance filtering
+scan_interval_minutes: 60
+use_semantic_matcher: false
+resume_path: "data/resume.txt"
+# Extra resumes for A/B comparison (--compare-resumes). Primary is always included.
+resume_variants: []
+#   - "data/resume-clinical.txt"
+#   - "data/resume-research.txt"
+db_path: "data/jobs.db"
+
+# Manual queue freshness: hide jobs older than this many days (by posted date,
+# falling back to first-seen) and jobs whose listed deadline has passed.
+# Set to 0 to disable the age cap (expired-deadline filtering still applies).
+queue_max_age_days: 90   # liveness check prunes dead ones, so cast wider
+
+# Indeed can't be verified (Cloudflare) and some show greyed-out apply buttons,
+# but it carries most of the premed inventory — keep it, tagged unverified.
+queue_exclude_sources: []
+
+# Auto-score top new above-threshold jobs for suitability during each scan
+# (requires ANTHROPIC_API_KEY). Uses prompt caching to keep cost low.
+inline_suitability: true
+inline_suitability_limit: 5
+
+# Boost jobs that advertise pay at/above target_annual (annualized). Jobs with
+# no salary listed are unaffected. Salary is parsed from the description.
+salary:
+  enabled: false
+  target_annual: 35000
+  boost: 0.10
+
+# Home-region proximity boost. Jobs located in these cities get +boost added to
+# their score so hometown roles rank higher — without excluding anywhere else.
+geo:
+  home_cities: ["waterloo", "kitchener", "cambridge"]
+  boost: 0.08
+  # Too far to commute — dropped from --manual-queue (Toronto/GTA + remote kept).
+  exclude_locations:
+    - "london"
+    - "ottawa"
+    - "windsor"
+    - "sudbury"
+    - "sarnia"
+    - "kingston"
+    - "thunder bay"
+    - "north bay"
+    - "sault"
+    - "barrie"
+    - "peterborough"
+    - "moose factory"
+    - "timmins"
+    - "kenora"
+
+scrapers:
+  jobbank:
+    enabled: true
+    max_pages: 5
+    query: "research assistant pharmacy healthcare biology"
+  remoteok:
+    enabled: true
+  adzuna:
+    enabled: true
+    max_pages: 5
+    query: "entry level biology healthcare assistant"
+    locations:
+      - "Guelph, Ontario"
+      - "Kitchener, Ontario"
+      - "Waterloo, Ontario"
+  uoguelph:
+    enabled: true
+    max_pages: 5
+  uwaterloo:
+    enabled: true
+    max_pages: 3
+  conestoga:
+    enabled: true
+    max_pages: 3
+  laurier:
+    enabled: true
+    max_pages: 3
+  linkedin:
+    enabled: true
+    max_pages: 3
+    query: "research assistant"
+  indeed:
+    enabled: true
+    max_pages: 3
+    query: "pharmacy assistant research biology"
+  # Hospital ATS portals all migrated to JS-rendered iCIMS/Workday or dead
+  # domains (Hamilton DNS-dead, Grand River times out, St. Mary's → wrhn.ca 403,
+  # Cambridge → encareers-cmh.icims.com JS). Disabled until rebuilt on Playwright.
+  hamiltonhealth:
+    enabled: false
+    max_pages: 3
+  grandriver:
+    enabled: false
+    max_pages: 2
+  stmarys:
+    enabled: false
+    max_pages: 2
+  cambridge:
+    enabled: false
+    max_pages: 2
+  # Talent.com — large aggregator, strong healthcare coverage, static HTML
+  # (no Playwright/Cloudflare). Replaces the broken hospital sources.
+  talent:
+    enabled: true
+    max_pages: 4
+    query: "healthcare assistant pharmacy clinical research"
+    locations:
+      - "Waterloo, ON"
+
+prefilter:
+  exclude_phrases:
+    - "master's degree required"
+    - "masters degree required"
+    - "phd required"
+    - "doctorate required"
+    - "registered nurse required"
+    - "licensed practical nurse required"
+    - "must be licensed"
+    - "minimum 3 years"
+    - "minimum 4 years"
+    - "minimum 5 years"
+    - "3+ years experience"
+    - "4+ years experience"
+    - "5+ years experience"
+    - "embryologist"
+    - "fertility specialist"
+    - "nurse practitioner"
+    - "physician assistant"
+  exclude_min_years_experience: 1   # excludes jobs requiring 2+ years
+  exclude_phrase_case_sensitive: false
+  # University employers — their ATS apply flow is unusable, so drop their jobs
+  # from --manual-queue no matter which board surfaced them.
+  exclude_companies:
+    - "university of guelph"
+    - "university of waterloo"
+    - "wilfrid laurier"
+    - "conestoga college"
+
+focus:
+  expand_resume: true
+  expand_weight: 3
+  keywords:
+    # Realistic for first-year pre-med
+    - "research assistant"
+    - "lab assistant"
+    - "medical scribe"
+    - "pharmacy assistant"
+    - "pharmacy technician"
+    - "medical receptionist"
+    - "clinical assistant"
+    - "healthcare"
+    - "hospital"
+    - "clinical"
+    - "patient"
+    - "biology"
+    - "medical"
+    - "orderly"
+    - "healthcare aide"
+    - "first aid"
+    - "cpr"
+    - "volunteer"
+    - "scribe"
+    - "technician"
+    - "laboratory"
+    # Entry-level soft skills he actually has
+    - "part time"
+    - "student"
+    - "entry level"
+    - "receptionist"
+    - "administrative"
+    - "childcare"
+    - "tutor"
+    - "supervisor"
+    - "communication"
+    # Light bio
+    - "biochemistry"
+    - "microbiology"
+    - "specimen"
+  boost_per_hit: 0.05
+  max_boost: 0.25
+
+# ── Structured master resume + per-job tailoring ─────────────────────────────
+# master_path:   single source of truth for tailoring (data/resume/master.yaml).
+#                Tailored resumes may only select/reorder/reword facts already
+#                in this file — never fabricate.
+# profiles:      optional per-profile tag-weight overrides used when selecting
+#                items for a tailored resume. Keys are profile names
+#                (research / technical / customer-service / general); values map
+#                a tag to its weight. Omit to use the built-in defaults.
+resume:
+  master_path: "data/resume/master.yaml"
+  profiles: {}
+  #   research:
+  #     lab: 4
+  #     research: 4
+  #   customer-service:
+  #     customer-service: 4
+  #     leadership: 2
+
+# Daily-flow auto-tailoring. After each scan, build a gap analysis + one-page
+# tailored resume for the top_n manual-queue matches (gap analysis is DB-cached;
+# an API call fires only for uncached jobs when a key is set). Output lands in
+# data/applications/<source>-<id8>/resume.pdf and shows up in --manual-queue.
+tailor:
+  auto: true                  # set false to disable auto-tailoring during scans
+  top_n: 5                    # how many top matches to tailor per scan
+  max_bullets_per_section: 4  # one-page cap: max bullets kept per section
+
+# ── Auto-apply ───────────────────────────────────────────────────────────────
+# Emails applications to jobs that list a contact email. Jobs with no email are
+# skipped (routed to --manual-queue for browser apply). Cover letters use the
+# keyless TEMPLATE backend unless ANTHROPIC_API_KEY is set.
+# smtp_password MUST be a Gmail App Password (not your normal password) —
+# generate at https://myaccount.google.com/apppasswords (2-Step Verification
+# must be ON). Prefer putting it in .env as AUTO_APPLY_SMTP_PASSWORD; leave blank
+# here. Until it is set, live sends cannot run.
+auto_apply:
+  enabled: true
+  from_email: "tahaelghadi@gmail.com"
+  smtp_host: "smtp.gmail.com"
+  smtp_port: 587
+  smtp_password: ""        # leave blank — set Gmail App Password in .env
+  min_score: 0.22
+  daily_limit: 10
+  unattended: false        # keep false → review each email before it sends

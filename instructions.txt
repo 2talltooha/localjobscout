@@ -1,0 +1,417 @@
+LocalJobScout — User Guide
+==========================
+
+WHAT IT DOES
+------------
+Scrapes 13 job boards (JobBank, Indeed, LinkedIn, Adzuna, UoGuelph, UWaterloo,
+Laurier, Conestoga, RemoteOK, and more), scores jobs against your resume,
+sends OS notifications, generates tailored cover letters, validates them for
+fabricated claims, and tracks your applications — all local, no cloud required.
+
+AI features (require ANTHROPIC_API_KEY):
+  - Resume profile parser: parses your resume once into a structured profile,
+    cached to data/resume_profile.json. Used by all AI features below.
+  - Suitability scoring: rates each job 0–1 for realistic fit; uses prompt
+    caching so repeated scoring costs ~85% less.
+  - Inline suitability: top new jobs above threshold are auto-scored during
+    every scan — no manual step needed.
+  - Resume tailoring: job-specific suggestions to improve your resume honestly.
+  - Cover letter generation: Claude-written letters grounded in your resume.
+  - Interview prep: Q&A for any job in the database.
+
+
+FIRST-TIME SETUP
+----------------
+1. Install dependencies:
+      pip install -e .
+      pip install playwright && playwright install chromium
+
+2. Copy and fill environment variables:
+      cp .env.example .env
+   Edit .env and add:
+      ANTHROPIC_API_KEY=...     (all AI features — get at console.anthropic.com)
+      ADZUNA_APP_ID=...         (free at developer.adzuna.com)
+      ADZUNA_APP_KEY=...
+
+3. Edit config.yaml:
+   - Set your location (default: "waterloo, ON")
+   - Enable/disable scrapers
+   - Adjust match_threshold (default: 0.22)
+
+4. Put your resume at:
+      data/resume.txt   (plain text or PDF)
+
+5. Run your first scan:
+      python -m localjobscout --once
+
+   On first scan with ANTHROPIC_API_KEY set, the tool automatically parses
+   your resume into a structured profile (data/resume_profile.json) and
+   suitability-scores the top new matches. No extra commands needed.
+
+
+DAILY WORKFLOW
+--------------
+See ranked, suitability-filtered jobs sorted by score:
+      python -m localjobscout --manual-queue
+
+Open the top 3 URLs in your browser:
+      python -m localjobscout --manual-queue --open 3
+
+Filter by status (e.g. only jobs you flagged as interested):
+      python -m localjobscout --manual-queue --status interested
+
+Mark a job (use the 8-character ID shown in --manual-queue):
+      python -m localjobscout --mark interested abc123ef
+      python -m localjobscout --mark applied   abc123ef
+      python -m localjobscout --mark rejected  abc123ef
+      python -m localjobscout --mark hidden    abc123ef   (hides from queue)
+
+Generate a cover letter for a job:
+      python -m localjobscout --cover abc123ef
+   Saved to: data/applications/<source>-<id>.md
+
+Get resume tailoring suggestions for a job:
+      python -m localjobscout --tailor abc123ef
+   Saved to: data/applications/<source>-<id>-resume-tips.md
+   Shows: keywords to add, sections to emphasize, honest reframings,
+          gaps to be aware of, and a 2-sentence verdict.
+
+Generate interview prep Q&A:
+      python -m localjobscout --prep abc123ef
+
+Check applications with no response (>7 days):
+      python -m localjobscout --follow-up
+
+List jobs with an upcoming application deadline (soonest first):
+      python -m localjobscout --deadlines
+   Deadlines are parsed from job descriptions during scan. Expired ones hidden.
+   Jobs due within 3 days are flagged red, within 7 days yellow.
+
+List all tracked applications:
+      python -m localjobscout --applications
+      python -m localjobscout --applications applied
+
+
+RESUME PROFILE (AI)
+-------------------
+Your resume is parsed once into a structured profile and cached at
+data/resume_profile.json. This profile is used by suitability scoring
+(prompt caching) and tailoring to give more accurate, consistent results.
+
+The cache auto-invalidates when your resume file is newer. To force a
+re-parse, delete data/resume_profile.json and run any AI command.
+
+The profile extracts:
+  - Name, education, year of study
+  - Skills, certifications, languages
+  - Experience summary (what you have actually done)
+  - Target roles (suited for) and roles to avoid (over-qualified requirements)
+
+
+RESUME TAILORING (AI)
+---------------------
+      python -m localjobscout --tailor abc123ef
+
+Reads the job description and your profile, then produces a Markdown report
+with five sections:
+
+  Keywords to Add     — job terms you can honestly use (you have the experience,
+                        just haven't used that exact phrasing on your resume)
+  Sections to Emphasize — which existing bullets to reorder or expand
+  Honest Reframings   — before → after examples (e.g. "camp counselor" →
+                        "supervised groups of 20+ participants in high-pressure
+                        outdoor environments")
+  Gaps                — what the job wants that you genuinely don't have.
+                        Listed so you DON'T fabricate them.
+  Verdict             — fit strength + single highest-impact change
+
+Cost: ~$0.01 per tailoring report (Claude haiku).
+Report saved to: data/applications/<source>-<id>-resume-tips.md
+
+
+SUITABILITY SCORING (AI)
+------------------------
+Suitability scoring rates each job 0.0–1.0 for realistic fit given your
+specific background (first-year student, no lab experience, etc.).
+
+Inline (automatic during scan):
+  Top 5 new above-threshold jobs are scored automatically every scan.
+  Controlled by config.yaml:
+      inline_suitability: true        # set false to disable
+      inline_suitability_limit: 5     # jobs scored per scan
+
+Manual batch scoring:
+      python -m localjobscout --suitability
+      python -m localjobscout --suitability-limit 20
+
+Prompt caching: when your resume profile exists, the static applicant context
+is cached by the API. Scoring 10 jobs costs roughly the same as scoring 2
+without caching — the profile block is only processed once per session.
+
+Jobs with suitability_score are shown in --manual-queue with a combined score
+(match × 0.6 + suitability × 0.4). Low-suitability jobs are filtered out.
+
+
+WEEKLY DIGEST (email summary)
+-----------------------------
+Build a high-signal summary of the best recent matches and optionally email it.
+
+Preview in console (dry run):
+      python -m localjobscout --digest
+      python -m localjobscout --digest --digest-days 14 --digest-top 15
+
+Send the email (uses the alerts SMTP settings in config.yaml):
+      python -m localjobscout --digest --digest-send
+
+Unlike per-scan alerts (fire every scan), the digest is one ranked summary of
+the top N jobs first seen in the last N days. Run it on a schedule (e.g. a
+Monday-morning cron / Task Scheduler job) for a weekly roundup.
+
+THE MONDAY HABIT (recommended)
+------------------------------
+weekly_digest.bat scans for fresh jobs, prints your top 10, emails them (if
+SMTP is configured), and reminds you to apply to 5. Double-click it any Monday.
+
+To run it automatically every Monday at 9 AM, register it once with Windows
+Task Scheduler (paste into an Administrator Command Prompt, one line):
+
+  schtasks /create /tn "LocalJobScout Weekly Digest" ^
+    /tr "C:\Users\awsom\OneDrive\Documents\cooode\claudecode\localjobscout\weekly_digest.bat" ^
+    /sc weekly /d MON /st 09:00
+
+Remove it later with:
+  schtasks /delete /tn "LocalJobScout Weekly Digest" /f
+
+The whole point: open the queue and apply to 5 jobs. Finding jobs you never
+apply to gets you nothing. Build the habit, not more features.
+
+
+RESUME A/B COMPARISON
+---------------------
+Score the whole job corpus against multiple resume versions and see which one
+performs best — useful for deciding which resume to keep as primary.
+
+1. Add extra resumes to config.yaml:
+      resume_variants:
+        - "data/resume-clinical.txt"
+        - "data/resume-research.txt"
+
+2. Run the comparison:
+      python -m localjobscout --compare-resumes
+
+   Reports per resume: average score, number of jobs it wins, and how many
+   land above your match threshold. The overall winner (highest average) is
+   starred. Set it as resume_path to use it by default.
+
+
+APPLICATION DEADLINES
+---------------------
+During each scan, LocalJobScout parses application deadlines from job
+descriptions ("apply by", "closing date", "deadline", etc.) and stores them.
+
+      python -m localjobscout --deadlines
+
+Lists jobs with upcoming deadlines, soonest first. Expired deadlines and
+applied/rejected/hidden jobs are hidden. Due ≤3 days = red, ≤7 days = yellow.
+
+
+SALARY-AWARE RANKING
+--------------------
+Optionally boost jobs that advertise higher pay. Salary is parsed from the
+job description (hourly rates are annualized at 2080 h/year).
+
+Enable in config.yaml:
+      salary:
+        enabled: true
+        target_annual: 35000   # jobs at/above get the full boost
+        boost: 0.10            # max score boost added
+
+Jobs with no salary listed are unaffected. After enabling, run --rescore so
+existing jobs pick up the change.
+
+
+RUNNING ON A SCHEDULE
+---------------------
+Run in the background — scans every 60 minutes, sends OS notifications
+when new matches appear above threshold. Top new matches are auto-suitability
+scored each run.
+      python -m localjobscout
+
+Change scan interval in config.yaml:
+      scan_interval_minutes: 30
+
+
+VIEWING RESULTS
+---------------
+Interactive TUI dashboard:
+      python -m localjobscout --tui
+
+HTML report (opens in browser):
+      python -m localjobscout --report
+
+Markdown export:
+      python -m localjobscout --export
+   Output: data/matches.md
+
+Score table from DB (debug view):
+      python -m localjobscout --diagnose
+
+
+COVER LETTER BACKENDS
+---------------------
+If ANTHROPIC_API_KEY is set: uses Claude (best quality, ~$0.01 per letter).
+Otherwise: uses the built-in template (fully offline, no API cost).
+
+Letters are validated for fabricated claims (WHMIS, retail experience,
+years of lab work, etc.) before being shown or sent.
+
+To block additional phrases, add them to config.yaml:
+      cover_letter:
+        forbidden_claims:
+          - "extensive research experience"
+          - "published author"
+
+
+AUTO-APPLY PIPELINE
+-------------------
+Dry run (safe — shows what would happen, sends nothing):
+      python -m localjobscout --auto-apply
+
+Live run with per-job review before sending:
+      python -m localjobscout --auto-apply --auto-apply-send
+
+Live run, no review prompts (unattended):
+      python -m localjobscout --auto-apply --auto-apply-send --yes-send-without-review
+
+Cap jobs processed:
+      python -m localjobscout --auto-apply --auto-apply-limit 10
+
+Override score threshold:
+      python -m localjobscout --auto-apply --auto-apply-score 0.20
+
+Note: auto-apply only emails jobs that list a contact email in the description.
+LinkedIn and Indeed Easy Apply are intentionally not automated (ToS + ban risk).
+
+
+CONFIG REFERENCE (config.yaml)
+--------------------------------
+location              City and province for job searches.
+match_threshold       Minimum score (0.0–1.0) to notify and queue. Default: 0.22.
+scan_interval_minutes How often to rescan in scheduler mode. Default: 60.
+resume_path           Path to resume file (.txt or .pdf).
+use_semantic_matcher  Set true for sentence-transformer scoring (extra install).
+inline_suitability    Auto-score top new jobs each scan. Default: true.
+inline_suitability_limit  Max jobs scored per scan. Default: 5.
+resume_variants       Extra resume files for --compare-resumes. Default: [].
+
+salary:
+  enabled             Boost jobs advertising pay at/above target. Default: false.
+  target_annual       Annualized salary for full boost. Default: 35000.
+  boost               Max score boost added. Default: 0.10.
+
+scrapers.*            Each scraper: enabled: true/false and max_pages.
+                      hamiltonhealth, grandriver, stmarys, cambridge off by default.
+
+prefilter:
+  exclude_phrases          Block jobs containing these substrings.
+  exclude_min_years_experience  Block jobs requiring >N years exp. Default: 2.
+  allowed_provinces        Only keep jobs in these provinces. Default: ["ON"].
+  exclude_companies        Block jobs from these company substrings.
+  exclude_title_regex      Regex to block job titles.
+
+focus.keywords        Words that boost score when in title/description.
+focus.boost_per_hit   Score boost per keyword hit. Default: 0.05.
+focus.max_boost       Max total boost. Default: 0.25.
+
+cover_letter:
+  forbidden_claims    Phrases always flagged by validation regardless of resume.
+
+auto_apply:
+  enabled             Set true to use --auto-apply.
+  from_email          Your email address.
+  smtp_host/port      SMTP server settings.
+  smtp_password       Use Gmail App Password; keep in .env, not here.
+  daily_limit         Max applications sent per day. Default: 10.
+  unattended          If true + --auto-apply-send, skips per-job review.
+
+alerts:
+  enabled             Send email summary after each scan.
+  method              "email" (only option currently).
+  email_*             SMTP settings for alert emails.
+  min_matches_to_alert  Only send if at least N matches found.
+
+
+ENVIRONMENT VARIABLES (.env)
+------------------------------
+ANTHROPIC_API_KEY     All AI features: cover letters, suitability, tailoring, prep.
+ADZUNA_APP_ID         Adzuna scraper (free at developer.adzuna.com).
+ADZUNA_APP_KEY        Adzuna scraper.
+
+Never commit your .env file.
+
+
+DATA FILES
+----------
+data/resume.txt                Your resume (.txt or .pdf).
+data/resume_profile.json       AI-parsed structured profile (auto-generated).
+data/jobs.db                   SQLite database — all scraped jobs + scores.
+data/matches.md                Last --export output.
+data/jobs.html                 Last --report output.
+data/auto_apply_log.jsonl      Audit log for --auto-apply runs.
+data/applications/             Cover letters, interview prep, tailoring reports.
+  <source>-<id>.md             Cover letter
+  <source>-<id>-resume-tips.md Resume tailoring report
+
+
+AI COST ESTIMATES
+-----------------
+All costs in USD. Claude haiku is very cheap.
+
+  Resume profile parse   ~$0.002  (once, then cached)
+  Suitability score      ~$0.001  per job (with caching, ~$0.0002 after first)
+  Cover letter           ~$0.010  per letter
+  Resume tailoring       ~$0.010  per report
+  Interview prep         ~$0.015  per Q&A set
+
+Running --once with 5 new jobs scored inline: ~$0.005 total.
+Scoring 50 jobs manually with --suitability: ~$0.01 with profile caching.
+
+
+TESTING
+-------
+Run the full test suite (392 tests):
+      pytest
+
+Run specific test files:
+      pytest tests/test_prefilter.py
+      pytest tests/test_cover_letter_validation.py
+      pytest tests/test_indeed_pw.py
+
+
+TROUBLESHOOTING
+---------------
+"No jobs found" after scan:
+  - Check internet connection and scraper logs (localjobscout.log).
+  - Indeed/LinkedIn use Playwright — ensure `playwright install chromium` ran.
+  - Cloudflare may block Indeed; it logs a warning and returns 0 gracefully.
+
+Resume profile not generating:
+  - Requires ANTHROPIC_API_KEY in .env.
+  - Delete data/resume_profile.json to force re-parse.
+  - Check localjobscout.log for "profile:" lines.
+
+Tailoring report has no job description content:
+  - Run --once first so the job description is fetched and stored.
+  - Indeed descriptions require Playwright to have run successfully.
+
+Cover letter reads oddly:
+  - Without ANTHROPIC_API_KEY the template backend is used. Add the key.
+
+Stale jobs in queue (BC/MB jobs, professor roles):
+  - Mark hidden: python -m localjobscout --mark hidden <id>
+  - Or delete data/jobs.db and rescan for a clean slate.
+
+Scores all low:
+  - Run --rescore after editing your resume.
+  - Lower match_threshold in config.yaml (try 0.15).
+  - Add keywords to focus.keywords in config.yaml.

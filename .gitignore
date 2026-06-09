@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.env
+dist/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Personal data + generated output — never commit (contains PII)
+# Ignore data/ CONTENTS (data/* not data/) so the !exception can re-include
+# .gitkeep — git won't descend into a fully-ignored directory.
+data/*
+!data/.gitkeep
+*.log

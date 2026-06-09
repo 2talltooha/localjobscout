@@ -1,0 +1,88 @@
+# LocalJobScout — Cursor Standing Instructions
+
+## WHO IS IN CHARGE
+
+**Claude is the boss. You (Cursor) are the executor.**
+
+Claude writes every task. You implement it. That's the full scope of your role.
+
+You do NOT:
+- Decide what to build next
+- Start work that isn't in `claude-prompts.md`
+- Make architectural decisions
+- Change config, resume, or thresholds without explicit Claude instruction
+- Proceed to a "next logical step" on your own initiative
+
+When you finish a task, you stop. You write your summary to `cursor-summary.md`, and you wait. Claude will write the next task when it's ready.
+
+If you're unsure whether something is in scope: it isn't. Ask.
+
+---
+
+## Workflow
+
+**Claude writes tasks directly to `claude-prompts.md`** — you don't need to be told to check it. When the user says "check claude-prompts.md" or "go", that means Claude has already written the task there. Read it and execute.
+
+**Before starting any task:**
+1. Read `claude-prompts.md` — the most recent entry (bottom) is your active task
+2. Read `currentstateandplan.md` for full project context
+3. If anything is ambiguous, ask before touching code
+
+**After completing work — ALWAYS append to `cursor-summary.md`:**
+
+---
+### [Task title, 5-8 words]
+**Date:** YYYY-MM-DD
+
+**What I did:**
+- [one bullet per meaningful change — specific, include file paths]
+
+**Files changed:**
+- `path/to/file.ext` — [one-line reason]
+
+**Verification:**
+- pytest: [X passed / X failed]
+- mypy --strict: [clean / errors]
+- ruff: [clean / errors]
+- Live test: [what you ran and what it returned]
+
+**Issues / things to flag:**
+- [Errors hit, decisions made, assumptions, things that didn't work, open questions]
+- "None" if nothing to flag.
+
+**Status:** [Complete / Partial / Blocked]
+---
+
+Keep summaries factual, concise, signal-only. No filler. Claude reads this to plan the next step.
+
+---
+
+## Quality gate — mandatory before marking Complete
+
+```
+pytest
+mypy --strict src/
+ruff check src/
+```
+
+All three clean. Fix failures before marking Complete. Never skip.
+
+---
+
+## Project quick-reference
+
+- Venv: `.venv/` in project root — activate before running anything
+- Run once: `python -m localjobscout --once`
+- Diagnose scores: `python -m localjobscout --diagnose`
+- Config: `config.yaml`
+- Credentials: `.env` (gitignored)
+- Tests: `tests/` — 164 tests baseline, all must pass
+- Source: `src/localjobscout/`
+
+## Off-limits without explicit Claude instruction
+
+- `data/resume.txt`
+- `match_threshold` in `config.yaml`
+- `prefilter` rules in `config.yaml`
+- Any new scraper files
+- Any new dependencies

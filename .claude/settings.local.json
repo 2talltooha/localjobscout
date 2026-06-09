@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -sSL -A \"Mozilla/5.0 \\(Windows NT 10.0; Win64; x64\\) AppleWebKit/537.36\" \"https://wlu.ca/careers\" -o /tmp/wlu_careers.html -w \"HTTP %{http_code}\\\\n%{url_effective}\\\\n\")",
+      "Bash(curl -sSL -A \"Mozilla/5.0\" \"https://wlu.ca/robots.txt\")",
+      "Bash(curl -sSL -A \"Mozilla/5.0 \\(Windows NT 10.0; Win64; x64\\) AppleWebKit/537.36\" \"https://wlu.ca/about/working-at-laurier/career-opportunities/index.html\" -o /tmp/wlu_jobs.html -w \"HTTP %{http_code}\\\\n%{url_effective}\\\\n\")",
+      "Bash(curl -sSL -A \"Mozilla/5.0 \\(Windows NT 10.0; Win64; x64\\) AppleWebKit/537.36\" \"https://careers.wlu.ca/go/Staff-and-Management-Positions/505147/\" -o /tmp/wlu_staff.html -w \"HTTP %{http_code}\\\\n%{url_effective}\\\\n\")",
+      "Bash(curl -sSL -A \"Mozilla/5.0\" \"https://careers.wlu.ca/robots.txt\")",
+      "Bash(curl -sSL -A \"Mozilla/5.0 \\(Windows NT 10.0; Win64; x64\\) AppleWebKit/537.36\" \"https://careers.wlu.ca/go/Academic-Positions/505047/\" -o /tmp/wlu_aca.html)",
+      "Bash(curl -sSL -A \"Mozilla/5.0\" \"https://careers.wlu.ca/job/Brantford-Lab-Coordinator%2C-Psychology-ON/1291075047/\" -o /tmp/wlu_det.html)",
+      "Bash(dir C:UsersawsomOneDriveDocumentscooodeclaudecodelocaljobscout *)",
+      "Bash(powershell.exe -NoProfile -Command \"Get-ScheduledTask -TaskName LocalJobScout -ErrorAction SilentlyContinue | Format-List TaskName,State\")",
+      "Bash(powershell.exe -NoProfile -Command \"[bool]\\([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent\\(\\)\\).IsInRole\\([Security.Principal.WindowsBuiltInRole]::Administrator\\)\")",
+      "Bash(schtasks /Create /SC ONLOGON /TN \"LocalJobScout\" /TR \"cmd.exe /c \\\\\"\\\\\"C:\\\\\\\\Users\\\\\\\\awsom\\\\\\\\OneDrive\\\\\\\\Documents\\\\\\\\cooode\\\\\\\\claudecode\\\\\\\\localjobscout\\\\\\\\run.bat\\\\\" > \\\\\"C:\\\\\\\\Users\\\\\\\\awsom\\\\\\\\OneDrive\\\\\\\\Documents\\\\\\\\cooode\\\\\\\\claudecode\\\\\\\\localjobscout\\\\\\\\localjobscout.log\\\\\" 2>&1\\\\\"\" /RL LIMITED /F)",
+      "PowerShell($proj = \"C:\\\\Users\\\\awsom\\\\OneDrive\\\\Documents\\\\cooode\\\\claudecode\\\\localjobscout\"; $cmd = \"cmd.exe /c `\"`\"$proj\\\\run.bat`\" > `\"$proj\\\\localjobscout.log`\" 2>&1`\"\"; schtasks.exe /Create /SC ONLOGON /TN \"LocalJobScout\" /TR $cmd /RL LIMITED /F)",
+      "PowerShell(Set-ItemProperty *)"
+    ]
+  }
+}
