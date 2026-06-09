@@ -106,6 +106,8 @@ SQLite at `data/jobs.db`. All columns on `jobs` table:
 | application_notes | TEXT | free text |
 | suitability_score | REAL | LLM score 0–1 (NULL until --suitability run) |
 | suitability_reason | TEXT | one-sentence LLM explanation |
+| qualification_verdict | TEXT | LLM hard-eligibility gate: yes/borderline/no (NULL = unchecked) |
+| unmet_requirements | TEXT | JSON array of hard requirements applicant lacks |
 
 ---
 
@@ -283,7 +285,15 @@ skipped entirely in unattended mode.
 
 ### `suitability.py — score_and_cache(job, resume_text)`
 Calls claude-haiku-4-5, returns (0–1 float, one-sentence reason). Cached per job_id
-in DB — never calls API twice for the same job. Skips gracefully when API key absent.
+in DB — never calls API twice for the same job. Skips gracefully when API key absent
+(or uses the `claude` CLI subscription backend when `LOCALJOBSCOUT_USE_CLI=1`).
+
+Same call also produces the **qualification gate**: `qualification_verdict`
+(yes/borderline/no) + `unmet_requirements` (JSON list). "no" = posting explicitly
+requires a credential/registration/program-enrolment/experience the applicant
+lacks → hard-hidden from `--manual-queue`. "borderline" rows show
+`⚠ check reqs: <unmet list>` in the queue. Rows cached before the gate existed
+(verdict NULL) are re-scored once to backfill on the next suitability pass.
 
 ### `linkedin_pw.py — extract_description_from_html(html)`
 Pure BeautifulSoup function (no Playwright). After card collection, `fetch()` navigates
@@ -354,6 +364,23 @@ Applied before `make_job_id()` so the same job gets a stable id across scrape ru
 
 ---
 
+## Scheduled Automation (Windows Task Scheduler)
+
+Task **"LocalJobScout Scan"** runs hourly while Taha is logged in:
+`wscript.exe scripts/run_scan_hidden.vbs` → `scripts/scheduled_scan.bat` →
+venv python `-m localjobscout --once` with `LOCALJOBSCOUT_USE_CLI=1`
+(LLM suitability+qualification via Claude CLI subscription, no API key).
+Output appended to `data/scan_task.log`. OS notifications fire on new matches.
+
+Manage: `schtasks /query /tn "LocalJobScout Scan"` · delete with
+`schtasks /delete /tn "LocalJobScout Scan" /f`.
+
+Email alerts (`alerts:` in config.yaml) remain off until a Gmail App Password
+is generated (https://myaccount.google.com/apppasswords) and put in `.env` as
+`AUTO_APPLY_SMTP_PASSWORD=...`.
+
+---
+
 ## File Locations
 
 ```
@@ -362,6 +389,7 @@ data/
 ├── jobs.db                 SQLite database
 ├── matches.md              auto-exported ranked job list
 ├── jobs.html               HTML report
+├── scan_task.log           scheduled-task scan output (append-only)
 ├── auto_apply_log.jsonl    audit log — one JSON line per processed job
 └── applications/           cover letters + interview prep (.md files)
 

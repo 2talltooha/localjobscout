@@ -118,11 +118,84 @@ def test_cache_hit_skips_api(
 
     job = _job()
     db_module.upsert_job(job)
-    db_module.set_suitability(job.id, 0.5, "pre-cached")
+    db_module.set_suitability(job.id, 0.5, "pre-cached", verdict="yes", unmet=[])
 
     result = suit_module.score_and_cache(job, "resume")
     assert result == (0.5, "pre-cached")
     assert rec.calls == []  # API never called
+
+
+def test_qualification_verdict_parsed_and_cached(
+    _db: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    rec = _Recorder(
+        '{"suitability": 0.15, "reason": "regulated role", "qualified": "no", '
+        '"unmet": ["OCP registration", "pharmacy technician diploma"]}'
+    )
+    _install_fake_anthropic(monkeypatch, rec)
+
+    job = _job(title="Pharmacy Helper")
+    db_module.upsert_job(job)
+
+    result = suit_module.score_and_cache(job, "resume")
+    assert result == (0.15, "regulated role")
+    assert db_module.get_qualification(job.id) == (
+        "no", ["OCP registration", "pharmacy technician diploma"]
+    )
+
+
+def test_pre_gate_cache_row_backfilled_with_verdict(
+    _db: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Rows cached before the qualification gate existed have no verdict —
+    # one more API call backfills it.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    rec = _Recorder(
+        '{"suitability": 0.7, "reason": "fine", "qualified": "yes", "unmet": []}'
+    )
+    _install_fake_anthropic(monkeypatch, rec)
+
+    job = _job()
+    db_module.upsert_job(job)
+    db_module.set_suitability(job.id, 0.5, "old pre-gate score")  # no verdict
+
+    result = suit_module.score_and_cache(job, "resume")
+    assert len(rec.calls) == 1  # API re-called to backfill
+    assert result == (0.7, "fine")
+    assert db_module.get_qualification(job.id) == ("yes", [])
+
+
+def test_pre_gate_cache_kept_when_api_unavailable(
+    _db: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    job = _job()
+    db_module.upsert_job(job)
+    db_module.set_suitability(job.id, 0.5, "old pre-gate score")
+
+    assert suit_module.score_and_cache(job, "resume") == (
+        0.5, "old pre-gate score"
+    )
+
+
+def test_invalid_verdict_string_stored_as_none(
+    _db: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    rec = _Recorder(
+        '{"suitability": 0.5, "reason": "ok", "qualified": "maybe", "unmet": []}'
+    )
+    _install_fake_anthropic(monkeypatch, rec)
+
+    job = _job()
+    db_module.upsert_job(job)
+    suit_module.score_and_cache(job, "resume")
+    assert db_module.get_qualification(job.id) is None
 
 
 def test_profile_path_uses_prompt_caching(

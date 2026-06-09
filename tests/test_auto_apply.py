@@ -89,6 +89,36 @@ def test_senior_titles_blocked(title: str) -> None:
     assert "senior title" in r.reason
 
 
+@pytest.mark.parametrize(
+    "title",
+    ["Pharmacy Technician", "Registered Pharmacy Technician",
+     "Pharmacy Student or Intern, Drug Distribution", "Pharmacy Intern"],
+)
+def test_regulated_pharmacy_titles_blocked(title: str) -> None:
+    # Ontario pharmacy technicians are OCP-registered; pharmacy student/intern
+    # roles require pharmacy-program enrolment a bio student doesn't have.
+    r = aa.check_suitability(_job(title=title))
+    assert not r.ok
+    assert "regulated-profession" in r.reason
+
+
+def test_pharmacy_assistant_still_passes() -> None:
+    # Pharmacy *assistant* is unregulated entry-level — must NOT be blocked.
+    r = aa.check_suitability(
+        _job(title="Pharmacy Assistant",
+             description="Entry-level support role in a community pharmacy.")
+    )
+    assert r.ok
+
+
+def test_ocp_registration_in_description_blocked() -> None:
+    r = aa.check_suitability(
+        _job(description="Must be registered with the Ontario College of "
+                         "Pharmacists in good standing.")
+    )
+    assert not r.ok
+
+
 def test_license_required_blocked() -> None:
     r = aa.check_suitability(
         _job(description="Must be a registered nurse with active license.")

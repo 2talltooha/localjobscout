@@ -92,6 +92,11 @@ _CREDENTIAL_TITLE_WORDS: tuple[str, ...] = (
     "surgeon",
     "dentist",
     "pharmacist",
+    # Ontario pharmacy technicians are OCP-registered (regulated profession);
+    # pharmacy student/intern roles require pharmacy-program enrolment.
+    "pharmacy technician",
+    "pharmacy student",
+    "pharmacy intern",
     "dietitian",
     "paramedic",
     "radiographer",
@@ -137,6 +142,8 @@ _LICENSE_PHRASES: tuple[str, ...] = (
     "rpn required",
     "must hold a license",
     "licensed pharmacist",
+    "registered pharmacy technician",
+    "ontario college of pharmacists",
     "registered veterinary technician",
     "class a ",
     "class b ",

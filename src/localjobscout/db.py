@@ -77,6 +77,8 @@ _COLUMN_MIGRATIONS = [
     "ALTER TABLE jobs ADD COLUMN suitability_score REAL",
     "ALTER TABLE jobs ADD COLUMN suitability_reason TEXT",
     "ALTER TABLE jobs ADD COLUMN deadline TEXT",
+    "ALTER TABLE jobs ADD COLUMN qualification_verdict TEXT",
+    "ALTER TABLE jobs ADD COLUMN unmet_requirements TEXT",
 ]
 
 _INDEX_MIGRATIONS = [
@@ -123,6 +125,10 @@ class Job:
     suitability_score: float | None = None
     suitability_reason: str | None = None
     deadline: str | None = None
+    # LLM qualification gate: "yes" | "borderline" | "no" | None (not yet checked)
+    qualification_verdict: str | None = None
+    # Hard requirements the applicant lacks, e.g. ["OCP registration"]
+    unmet_requirements: list[str] = field(default_factory=list)
 
 
 def make_job_id(source: str, url: str) -> str:
@@ -373,6 +379,16 @@ def _row_to_job(row: sqlite3.Row) -> Job:
             else None
         ),
         deadline=row["deadline"] if "deadline" in keys else None,
+        qualification_verdict=(
+            row["qualification_verdict"]
+            if "qualification_verdict" in keys
+            else None
+        ),
+        unmet_requirements=(
+            json.loads(row["unmet_requirements"])
+            if "unmet_requirements" in keys and row["unmet_requirements"]
+            else []
+        ),
     )
 
 
@@ -462,26 +478,66 @@ def get_suitability(job_id: str) -> tuple[float, str] | None:
     return float(row[0]), str(row[1] or "")
 
 
-def set_suitability(job_id: str, score: float, reason: str) -> None:
-    """Store suitability score + reason for job_id."""
+def set_suitability(
+    job_id: str,
+    score: float,
+    reason: str,
+    verdict: str | None = None,
+    unmet: list[str] | None = None,
+) -> None:
+    """Store suitability score + reason (and optional qualification verdict)."""
     db_path = _require_db()
     with _get_conn(db_path) as conn:
         conn.execute(
-            "UPDATE jobs SET suitability_score = ?, suitability_reason = ? "
+            "UPDATE jobs SET suitability_score = ?, suitability_reason = ?, "
+            "qualification_verdict = ?, unmet_requirements = ? "
             "WHERE id = ?",
-            (score, reason, job_id),
+            (
+                score,
+                reason,
+                verdict,
+                json.dumps(unmet) if unmet else None,
+                job_id,
+            ),
         )
 
 
+def get_qualification(job_id: str) -> tuple[str, list[str]] | None:
+    """Return cached (verdict, unmet_requirements) for job_id, or None."""
+    db_path = _require_db()
+    with _get_conn(db_path) as conn:
+        cursor = conn.execute(
+            "SELECT qualification_verdict, unmet_requirements FROM jobs "
+            "WHERE id = ? AND qualification_verdict IS NOT NULL",
+            (job_id,),
+        )
+        row = cursor.fetchone()
+    if row is None:
+        return None
+    unmet_raw = row["unmet_requirements"]
+    return str(row["qualification_verdict"]), (
+        json.loads(unmet_raw) if unmet_raw else []
+    )
+
+
 def get_jobs_for_suitability(threshold: float, limit: int = 50) -> list[Job]:
-    """Return jobs above threshold that have not yet been suitability-scored."""
+    """Return jobs above threshold that still need LLM scoring.
+
+    Includes rows scored before the qualification gate existed
+    (suitability cached but qualification_verdict NULL) so a --suitability
+    run backfills their verdicts.
+    """
     db_path = _require_db()
     with _get_conn(db_path) as conn:
         cursor = conn.execute(
             """SELECT * FROM jobs
                WHERE score >= ?
                  AND score > -0.5
-                 AND suitability_score IS NULL
+                 AND (suitability_score IS NULL
+                      OR qualification_verdict IS NULL)
+                 AND (application_status IS NULL
+                      OR application_status NOT IN
+                         ('applied', 'rejected', 'hidden'))
                ORDER BY score DESC
                LIMIT ?""",
             (threshold, limit),

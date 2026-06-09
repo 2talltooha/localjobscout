@@ -1170,12 +1170,20 @@ def _cmd_manual_queue(
         today=today.isoformat(),
         min_date=min_date,
     )
-    # Static filters: suitability (relevance/credential/title) + closed-phrase.
+    # Static filters: suitability (relevance/credential/title) + closed-phrase
+    # + LLM qualification gate (verdict "no" = hard requirement unmet).
+    unqualified = [j for j in raw_jobs if j.qualification_verdict == "no"]
     jobs = [
         j for j in raw_jobs
         if check_suitability(j).ok
+        and j.qualification_verdict != "no"
         and not description_indicates_closed(j.description)
     ]
+    if unqualified:
+        console.print(
+            f"[dim]{len(unqualified)} job(s) hidden — unmet hard requirements "
+            f"(credentials/education). See --diagnose --all.[/dim]"
+        )
 
     # Source filter — drop sources that can't be verified (config
     # queue_exclude_sources, e.g. "indeed": Cloudflare blocks all checks).
@@ -1307,6 +1315,15 @@ def _cmd_manual_queue(
             "indeed": "[blue]indeed[/blue]",
         }.get(job.source, f"[dim]{job.source}[/dim]")
 
+        # Qualification gate result — "no" rows are filtered out above;
+        # show unmet requirements for "borderline" so Taha can judge.
+        qual_str = ""
+        if job.qualification_verdict == "borderline" and job.unmet_requirements:
+            unmet_list = "; ".join(job.unmet_requirements[:3])
+            qual_str = f"\n[yellow]⚠ check reqs:[/yellow] {unmet_list[:120]}"
+        elif job.qualification_verdict == "yes":
+            qual_str = "\n[green]✓ meets stated requirements[/green]"
+
         conf = confidence.get(job.id)
         if conf == "live":
             method_tag += "  [green]✓ live[/green]"
@@ -1321,7 +1338,7 @@ def _cmd_manual_queue(
             f"[bold]{job.title[:70]}[/bold]\n"
             f"[dim]{job.company[:40]}[/dim]  ·  {job.location[:35]}"
             f"  ·  {method_tag}{status_str}\n"
-            f"{score_parts}\n"
+            f"{score_parts}{qual_str}\n"
             f"URL:    {job.url}\n"
             f"Letter: {cl_path_str}"
             f"{resume_str}"
