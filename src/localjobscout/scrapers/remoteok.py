@@ -74,7 +74,9 @@ class RemoteOKScraper(Scraper):
 
     async def fetch(self, location: str) -> list[Job]:
         async with httpx.AsyncClient(headers={"User-Agent": USER_AGENT}) as client:
-            resp = await polite_get(client, _API_URL)
+            # source tag pins this JSON API to the legacy httpx path
+            # (fetch.legacy_sources) — Scrapling wraps raw JSON in HTML.
+            resp = await polite_get(client, _API_URL, source="remoteok")
 
         if resp is None:
             return []

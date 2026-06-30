@@ -52,10 +52,95 @@ geo:
     - "timmins"
     - "kenora"
 
+# ── Target job categories ────────────────────────────────────────────────────
+# Each enabled category contributes search `queries` (fanned out one scraper
+# run per query across the general boards: jobbank, adzuna, linkedin, indeed,
+# talent) and `keywords` (used by scoring focus/target-fit). This is the main
+# intake-widening lever — add/disable categories or queries to control volume.
+# Capped by `max_intake_queries` below. Disable a category with `enabled: false`
+# (e.g. turn off retail_service in biomed-only mode).
+max_intake_queries: 10
+categories:
+  # letter_framing → per-category cover-letter framing (Step 3); forbidden_claims
+  # → category-specific validation rules layered on the universal baseline.
+  # Clinical/licence policing lives ONLY on lab_research — retail/dev/admin are
+  # never policed for clinical claims, but all categories get the baseline.
+  - name: general_dev
+    enabled: true
+    queries:
+      - "junior developer"
+      - "it support"
+    keywords: ["software", "developer", "it support", "help desk", "data", "web"]
+    letter_framing: "building practical technical skills, learning tools quickly, and approaching problems methodically"
+    forbidden_claims: ["years of professional software development", "computer science degree"]
+  - name: lab_research
+    enabled: true
+    queries:
+      - "research assistant"
+      - "lab assistant"
+    keywords: ["research", "lab", "laboratory", "science", "biology", "clinical"]
+    letter_framing: "scientific coursework, careful protocol-following, and accurate record-keeping"
+    forbidden_claims: ["clinical experience", "patient care", "registered nurse", "professional licence"]
+  - name: retail_service
+    enabled: true
+    queries:
+      - "customer service"
+      - "retail associate"
+    keywords: ["retail", "customer service", "cashier", "sales", "food service"]
+    letter_framing: "reliability, teamwork, and clear communication with customers"
+    forbidden_claims: ["years of retail management experience"]
+  - name: admin
+    enabled: true
+    queries:
+      - "administrative assistant"
+      - "receptionist"
+    keywords: ["administrative", "receptionist", "office", "data entry", "clerk"]
+    letter_framing: "organization, attention to detail, and dependable communication"
+    forbidden_claims: ["years of administrative experience"]
+
+# ── Target-fit profiles ──────────────────────────────────────────────────────
+# active_profile selects the scoring blend + suitability stance + relevance gate.
+#   broad  = income / take-anything: resume-weighted, all categories count for
+#            target-fit, NO pre-med domain gate (dev/retail/admin survive).
+#   biomed = picky pre-med: target-weighted toward lab_research, pre-med domain
+#            gate ON (drops off-narrative roles), higher threshold.
+# Scoring blend: combined = w_resume*resume_fit + w_target*target_fit.
+# Switch modes by changing this one line.
+active_profile: broad
+profiles:
+  - name: broad
+    w_resume: 0.6
+    w_target: 0.4
+    target_categories: []          # empty = all enabled categories
+    relevance_gate: none
+    suitability_persona: >
+      The applicant is an entry-level student seeking part-time, summer, or
+      flexible income work across MANY fields — general/office, retail and
+      customer service, administrative, entry tech/IT, and lab/research all
+      count. Do NOT penalize a role for being outside health or science. Judge
+      realistic fit for an entry-level worker. Only mark unqualified when the
+      posting demands a credential, professional licence, or years of
+      experience the applicant lacks.
+  - name: biomed
+    w_resume: 0.5            # nudged from 0.4 — reach lab roles flooded the top
+    w_target: 0.5            # at 0.5/0.5, resume_fit tempers aspirational ranking
+    target_categories: ["lab_research"]
+    relevance_gate: premed
+    match_threshold: 0.22
+    suitability_persona: >
+      The applicant is NOT enrolled in any professional program (pharmacy,
+      nursing, paramedicine, lab technology) and cannot hold
+      regulated-profession registration. Judge fit for a pre-medicine pathway:
+      clinical, patient-contact, health, biology/research, and care work are
+      ideal. If the posting requires a completed diploma/degree, professional
+      registration, or program enrolment the applicant does not have, score
+      0.2 or lower regardless of subject-matter match.
+
 scrapers:
   jobbank:
     enabled: true
     max_pages: 5
+    # Fallback query — IGNORED while any enabled category above defines queries.
     query: "research assistant pharmacy healthcare biology"
   remoteok:
     enabled: true
@@ -236,3 +321,24 @@ auto_apply:
   min_score: 0.22
   daily_limit: 10
   unattended: false        # keep false → review each email before it sends
+
+cowork:
+  enabled: true
+  queue_dir: "cowork_queue"
+  min_score: 0.0            # 0.0 = use match_threshold
+  gate_qualified: true      # skip qualification_verdict=no jobs
+
+# Page-fetch engine (Phase 1: transport only — selectors unchanged).
+# Routes HTML fetches through Scrapling for anti-bot resilience, falling back
+# to the built-in httpx/Playwright path when disabled or not installed.
+# Install: pip install "scrapling[fetchers]" && scrapling install
+fetch:
+  enabled: true             # master switch; false = legacy fetch path
+  default_engine: auto      # auto | plain | stealth
+  stealth_sources:          # forced onto StealthyFetcher in auto mode
+    - indeed
+    - linkedin
+  source_engines: {}        # per-source override, e.g. {talent: stealth}
+  legacy_sources:           # always use built-in httpx (skip Scrapling)
+    - remoteok              # JSON API — Scrapling wraps raw JSON in HTML
+  timeout: 20.0

@@ -21,6 +21,7 @@ from localjobscout.matching import (
     extract_salary_from_text,
     extract_skills,
 )
+from localjobscout.scrapers import fetcher
 from localjobscout.scrapers.adzuna import AdzunaScraper
 from localjobscout.scrapers.base import Scraper
 from localjobscout.scrapers.cambridge import CambridgeScraper
@@ -54,40 +55,47 @@ class ScanResult:
 
 def _make_scrapers(settings: Settings) -> list[Scraper]:
     scrapers: list[Scraper] = []
+    # Query-capable general boards fan out one instance per category query
+    # (settings.queries_for → enabled-category queries, else the board's own
+    # query). This is the main intake-widening lever: more queries → more jobs.
     if settings.scrapers.jobbank.enabled:
-        scrapers.append(
-            JobBankScraper(
-                max_pages=settings.scrapers.jobbank.max_pages,
-                query=settings.scrapers.jobbank.query,
+        for q in settings.queries_for(settings.scrapers.jobbank.query):
+            scrapers.append(
+                JobBankScraper(
+                    max_pages=settings.scrapers.jobbank.max_pages,
+                    query=q,
+                )
             )
-        )
     if settings.scrapers.remoteok.enabled:
         scrapers.append(RemoteOKScraper())
     if settings.scrapers.adzuna.enabled and settings.adzuna_app_id:
         adzuna_locs = settings.scrapers.adzuna.locations
-        scrapers.append(
-            AdzunaScraper(
-                app_id=settings.adzuna_app_id,
-                app_key=settings.adzuna_app_key,
-                query=settings.scrapers.adzuna.query,
-                max_pages=settings.scrapers.adzuna.max_pages,
-                location_override=adzuna_locs[0] if adzuna_locs else "",
+        for q in settings.queries_for(settings.scrapers.adzuna.query):
+            scrapers.append(
+                AdzunaScraper(
+                    app_id=settings.adzuna_app_id,
+                    app_key=settings.adzuna_app_key,
+                    query=q,
+                    max_pages=settings.scrapers.adzuna.max_pages,
+                    location_override=adzuna_locs[0] if adzuna_locs else "",
+                )
             )
-        )
     if settings.scrapers.linkedin.enabled:
-        scrapers.append(
-            LinkedInPlaywrightScraper(
-                query=settings.scrapers.linkedin.query,
-                max_pages=settings.scrapers.linkedin.max_pages,
+        for q in settings.queries_for(settings.scrapers.linkedin.query):
+            scrapers.append(
+                LinkedInPlaywrightScraper(
+                    query=q,
+                    max_pages=settings.scrapers.linkedin.max_pages,
+                )
             )
-        )
     if settings.scrapers.indeed.enabled:
-        scrapers.append(
-            IndeedPlaywrightScraper(
-                query=settings.scrapers.indeed.query,
-                max_pages=settings.scrapers.indeed.max_pages,
+        for q in settings.queries_for(settings.scrapers.indeed.query):
+            scrapers.append(
+                IndeedPlaywrightScraper(
+                    query=q,
+                    max_pages=settings.scrapers.indeed.max_pages,
+                )
             )
-        )
     if settings.scrapers.uoguelph.enabled:
         scrapers.append(UofGScraper(max_pages=settings.scrapers.uoguelph.max_pages))
     if settings.scrapers.uwaterloo.enabled:
@@ -135,17 +143,19 @@ def _make_scrapers(settings: Settings) -> list[Scraper]:
                 )
             )
     if settings.scrapers.talent.enabled:
-        scrapers.append(
-            TalentScraper(
-                query=settings.scrapers.talent.query or "healthcare",
-                max_pages=settings.scrapers.talent.max_pages,
-                location=(
-                    settings.scrapers.talent.locations[0]
-                    if settings.scrapers.talent.locations
-                    else ""
-                ),
-            )
+        talent_loc = (
+            settings.scrapers.talent.locations[0]
+            if settings.scrapers.talent.locations
+            else ""
         )
+        for q in settings.queries_for(settings.scrapers.talent.query or "healthcare"):
+            scrapers.append(
+                TalentScraper(
+                    query=q or "healthcare",
+                    max_pages=settings.scrapers.talent.max_pages,
+                    location=talent_loc,
+                )
+            )
     return scrapers
 
 
@@ -198,8 +208,9 @@ def _run_inline_suitability(
     from localjobscout import suitability as suit_module
     from localjobscout.profile import load_or_parse
 
+    threshold = settings.effective_threshold()
     candidates = sorted(
-        [j for j in scoreable_jobs if (j.score or 0.0) >= settings.match_threshold],
+        [j for j in scoreable_jobs if (j.score or 0.0) >= threshold],
         key=lambda j: j.score or 0.0,
         reverse=True,
     )[:settings.inline_suitability_limit]
@@ -208,9 +219,12 @@ def _run_inline_suitability(
         return
 
     profile = load_or_parse(settings.resume_path, resume_text)
+    persona = settings.active_target_profile().suitability_persona
     scored_count = 0
     for job in candidates:
-        result = suit_module.score_and_cache(job, resume_text, profile=profile)
+        result = suit_module.score_and_cache(
+            job, resume_text, profile=profile, persona=persona
+        )
         if result is not None:
             scored_count += 1
 
@@ -237,13 +251,14 @@ def _run_auto_tailor(settings: Settings) -> int:
         return 0
 
     master_hash = master.master_hash()
-    candidates = db.get_manual_queue_jobs(settings.match_threshold)
+    candidates = db.get_manual_queue_jobs(settings.effective_threshold())
     # Skip jobs the suitability/qualification gates would hide from the queue —
     # tailoring them wastes one LLM call each (e.g. RPN postings).
     from localjobscout.auto_apply import check_suitability
+    gate = settings.active_target_profile().relevance_gate
     candidates = [
         j for j in candidates
-        if j.qualification_verdict != "no" and check_suitability(j).ok
+        if j.qualification_verdict != "no" and check_suitability(j, gate).ok
     ]
     candidates = sorted(
         candidates, key=lambda j: j.score or 0.0, reverse=True
@@ -309,6 +324,10 @@ async def run_scan(settings: Settings) -> ScanResult:
 
         job_matcher = matcher.build_matcher(settings, nlp)
         db.init_db(settings.db_path)
+
+        # Activate the Scrapling fetch adapter for this scan (no-op fallback to
+        # the built-in httpx/Playwright path when disabled or not installed).
+        fetcher.configure(settings.fetch)
 
         scrapers = _make_scrapers(settings)
         scrapers_run = len(scrapers)
@@ -376,10 +395,29 @@ async def run_scan(settings: Settings) -> ScanResult:
             _run_inline_suitability(settings, resume_text, scoreable_jobs)
 
         jobs_notified = 0
-        for job in db.get_unnotified_above(settings.match_threshold):
+        for job in db.get_unnotified_above(settings.effective_threshold()):
             notifier.notify_match(job, job.score or 0.0)
             db.mark_notified(job.id)
             jobs_notified += 1
+
+        # Export qualifying jobs to cowork_queue/ for Cowork to consume.
+        if settings.cowork.enabled:
+            from localjobscout.cowork_export import export_to_cowork_queue
+
+            thr = settings.cowork.min_score or settings.effective_threshold()
+            cowork_candidates = [
+                j for j in db.get_recent_jobs(limit=None)
+                if (j.score or 0.0) >= thr
+                and (
+                    not settings.cowork.gate_qualified
+                    or j.qualification_verdict != "no"
+                )
+            ]
+            n_cowork = export_to_cowork_queue(
+                cowork_candidates, settings.cowork.queue_dir
+            )
+            if n_cowork:
+                log.debug("Cowork export: queued %d new job(s)", n_cowork)
 
         # Auto-tailor gap analysis + resume for the top matches in the queue.
         resumes_tailored = 0

@@ -78,6 +78,52 @@ def _cmd_test_notify() -> int:
     return 0
 
 
+def _cmd_fetch_test(settings: Settings, url: str, engine: str | None) -> int:
+    """Fetch one URL through the adapter end-to-end and report the result."""
+    from localjobscout.liveness import extract_main_text
+    from localjobscout.scrapers import fetcher
+
+    if not fetcher.SCRAPLING_AVAILABLE:
+        console.print(
+            "[yellow]Scrapling not installed.[/yellow] Install with:\n"
+            '  pip install "scrapling[fetchers]" && scrapling install\n'
+            "The live pipeline would fall back to the built-in httpx/"
+            "Playwright fetch path."
+        )
+        return 1
+
+    # Force the adapter on for the test, honouring config engine policy but
+    # letting --engine override per invocation.
+    fetch_cfg = settings.fetch.model_copy(update={"enabled": True})
+    fetcher.configure(fetch_cfg)
+    resolved = fetcher.resolve_engine(None, override=engine)
+
+    console.print(f"Fetching [cyan]{url}[/cyan] via engine [bold]{resolved}[/bold] …")
+    result = asyncio.run(fetcher.fetch_page(url, engine=engine))
+
+    if not result.ok:
+        console.print(
+            f"[red]Fetch failed[/red] (engine={result.engine_used or resolved}): "
+            f"{result.reason}"
+        )
+        console.print(
+            "[dim]In a real scan this URL would fall back to the built-in "
+            "httpx/Playwright path.[/dim]"
+        )
+        return 1
+
+    html = result.html or ""
+    text = extract_main_text(html)
+    console.print("[green]OK[/green]")
+    console.print(f"  engine:    {result.engine_used}")
+    console.print(f"  status:    {result.status}")
+    console.print(f"  html size: {len(html):,} chars")
+    console.print(f"  text size: {len(text):,} chars")
+    console.print("  text preview:")
+    console.print(f"    {text[:500]!r}")
+    return 0
+
+
 def _cmd_diagnose(settings: Settings, all_jobs: bool = False) -> int:
     """Score recent DB jobs against current resume and print a score table.
 
@@ -221,6 +267,21 @@ def main() -> int:
         default=Path("config.yaml"),
         metavar="PATH",
         help="Path to config file (default: ./config.yaml)",
+    )
+    parser.add_argument(
+        "--fetch-test",
+        metavar="URL",
+        help=(
+            "Fetch one URL through the Scrapling adapter end-to-end and print "
+            "engine, status, HTML size, and a text preview. Use before a full "
+            "crawl to confirm fetching works."
+        ),
+    )
+    parser.add_argument(
+        "--engine",
+        choices=["auto", "plain", "stealth"],
+        default=None,
+        help="With --fetch-test: force the fetch engine (default: auto).",
     )
     parser.add_argument(
         "--once",
@@ -497,6 +558,9 @@ def main() -> int:
         )
         return 1
     settings = Settings.load(config_path)
+
+    if args.fetch_test:
+        return _cmd_fetch_test(settings, args.fetch_test, args.engine)
 
     if args.tui:
         from localjobscout.tui import launch_tui
@@ -1122,7 +1186,9 @@ def _verify_and_enrich_queue(
             # Enrich: persist the fuller text and re-judge on it.
             job.description = result.full_text
             db_module.update_description(job.id, result.full_text)
-            verdict = check_suitability(job)
+            verdict = check_suitability(
+                job, settings.active_target_profile().relevance_gate
+            )
             if not verdict.ok:
                 db_module.update_application_status(job.id, "hidden")
                 console.print(
@@ -1165,17 +1231,18 @@ def _cmd_manual_queue(
     if settings.queue_max_age_days > 0:
         min_date = (today - timedelta(days=settings.queue_max_age_days)).isoformat()
     raw_jobs = db_module.get_manual_queue_jobs(
-        settings.match_threshold,
+        settings.effective_threshold(),
         status_filter=status_filter,
         today=today.isoformat(),
         min_date=min_date,
     )
     # Static filters: suitability (relevance/credential/title) + closed-phrase
     # + LLM qualification gate (verdict "no" = hard requirement unmet).
+    gate = settings.active_target_profile().relevance_gate
     unqualified = [j for j in raw_jobs if j.qualification_verdict == "no"]
     jobs = [
         j for j in raw_jobs
-        if check_suitability(j).ok
+        if check_suitability(j, gate).ok
         and j.qualification_verdict != "no"
         and not description_indicates_closed(j.description)
     ]
@@ -1417,7 +1484,9 @@ def _cmd_suitability(settings: Settings, *, limit: int = 50) -> int:
         console.print(f"[red]Resume not found at {settings.resume_path}[/red]")
         return 1
 
-    jobs = db_module.get_jobs_for_suitability(settings.match_threshold, limit=limit)
+    jobs = db_module.get_jobs_for_suitability(
+        settings.effective_threshold(), limit=limit
+    )
     if not jobs:
         console.print(
             "[yellow]No un-scored jobs above threshold.[/yellow] "
@@ -1425,14 +1494,16 @@ def _cmd_suitability(settings: Settings, *, limit: int = 50) -> int:
         )
         return 0
 
+    persona = settings.active_target_profile().suitability_persona
     console.print(
         f"Scoring [bold]{len(jobs)}[/bold] jobs for suitability "
-        f"(threshold ≥ {settings.match_threshold:.2f})…\n"
+        f"(threshold ≥ {settings.effective_threshold():.2f}, "
+        f"profile: {settings.active_profile})…\n"
     )
 
     scored = 0
     for job in jobs:
-        result = suit_module.score_and_cache(job, resume_text)
+        result = suit_module.score_and_cache(job, resume_text, persona=persona)
         if result is None:
             continue
         score, reason = result

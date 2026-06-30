@@ -10,6 +10,7 @@ from urllib.robotparser import RobotFileParser
 import httpx
 
 from localjobscout.db import Job
+from localjobscout.scrapers import fetcher
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,15 @@ async def polite_get(
     url: str,
     *,
     delay_seconds: float = 2.0,
+    source: str | None = None,
 ) -> httpx.Response | None:
+    """Fetch a URL politely (robots + delay), preferring the Scrapling adapter.
+
+    When the fetch adapter is active it handles the GET (anti-bot resilient)
+    and the result is wrapped in an ``httpx.Response`` so callers are
+    unchanged. If the adapter is inactive or fails, this falls back to the
+    original httpx GET — identical to pre-integration behaviour.
+    """
     parsed = urlparse(url)
     host = parsed.netloc
 
@@ -54,6 +63,20 @@ async def polite_get(
 
     await asyncio.sleep(delay_seconds)
 
+    # ── Preferred path: Scrapling fetch adapter ──────────────────────────────
+    if fetcher.is_active() and not fetcher.should_bypass(source):
+        result = await fetcher.fetch_page(url, source=source)
+        if result.ok and result.html is not None:
+            logger.debug(
+                "fetched %s via scrapling:%s", url, result.engine_used
+            )
+            return httpx.Response(status_code=result.status, html=result.html)
+        logger.debug(
+            "scrapling fetch unusable for %s (%s); falling back to httpx",
+            url, result.reason,
+        )
+
+    # ── Fallback path: built-in httpx GET (unchanged) ────────────────────────
     try:
         resp = await client.get(url, follow_redirects=True, timeout=20.0)
     except httpx.HTTPError as exc:

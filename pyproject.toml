@@ -11,7 +11,7 @@ requires-python = ">=3.11"
 dependencies = [
     "beautifulsoup4~=4.12",
     "httpx~=0.27",
-    "playwright~=1.47",
+    "playwright~=1.60",
     "scikit-learn~=1.5",
     "spacy~=3.7",
     "numpy~=1.26",
@@ -39,6 +39,14 @@ ai = [
     # tailoring, and interview prep. Conditionally imported — all AI features
     # degrade gracefully when this is not installed or no API key is set.
     "anthropic>=0.40",
+]
+fetch = [
+    # Scrapling fetch engine — anti-bot resilient page fetching behind the
+    # fetch adapter (scrapers/fetcher.py). Conditionally imported: when this
+    # is absent the adapter reports unavailable and the pipeline falls back to
+    # the built-in httpx/Playwright fetch path. Install with:
+    #   pip install "scrapling[fetchers]" && scrapling install
+    "scrapling[fetchers]>=0.2",
 ]
 dev = [
     "pytest>=8.0",
@@ -110,6 +118,12 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 # fpdf2 is an optional extra for tailored-resume PDF rendering.
 module = ["fpdf", "fpdf.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# scrapling is an optional extra (fetch engine); conditionally imported and
+# ships no type stubs.
+module = ["scrapling", "scrapling.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
