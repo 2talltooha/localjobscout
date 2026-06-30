@@ -8,18 +8,72 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from typing import Any
 from urllib.parse import urljoin
 
 import httpx
 from bs4 import BeautifulSoup, Tag
 
 from localjobscout.db import Job, make_job_id
+from localjobscout.scrapers import fetcher
+from localjobscout.scrapers.adaptive import first, first_nonempty
 from localjobscout.scrapers.base import USER_AGENT, Scraper, polite_get
 
 logger = logging.getLogger(__name__)
 
 _LISTING_URL = "https://www.cmh.org/careers"
 _MAX_LISTINGS = 100
+
+_ITEM_CANDIDATES = [
+    "li.views-row",
+    "div.views-row",
+    "article.job",
+    "table.career-table tbody tr",
+    ".job-opportunity",
+]
+_BODY_CANDIDATES = [
+    "div.field--name-body",
+    "div.job-description",
+    "main article",
+    ".entry-content",
+]
+
+
+# ── Adaptive (self-healing) extraction ───────────────────────────────────────
+def extract_items_adaptive(
+    selector: Any, base_url: str, seen_urls: set[str]
+) -> list[dict[str, str]]:
+    """Pull job items from a cambridge listing Selector via adaptive selectors."""
+    items = first_nonempty(
+        selector, _ITEM_CANDIDATES, identifier="cambridge_item_list"
+    )
+    out: list[dict[str, str]] = []
+    for item in items:
+        link = first(item, "a")
+        if link is None:
+            continue
+        href = link.attrib.get("href")
+        if not href:
+            continue
+        detail_url = urljoin(base_url, href)
+        if detail_url in seen_urls:
+            continue
+        seen_urls.add(detail_url)
+        title = str(link.text or "").strip()
+        if not title or len(title) < 4:
+            continue
+        dept_el = first(item, ".department, .field--name-field-dept")
+        department = str(dept_el.text or "").strip() if dept_el is not None else ""
+        out.append({"href": detail_url, "title": title, "department": department})
+    return out
+
+
+def extract_description_adaptive(selector: Any) -> str:
+    el = first_nonempty(selector, _BODY_CANDIDATES, identifier="cambridge_job_desc")
+    if not el:
+        return ""
+    text = " ".join(el[0].get_all_text().split())
+    return text if len(text) > 50 else ""
 
 
 class CambridgeScraper(Scraper):
@@ -29,6 +83,60 @@ class CambridgeScraper(Scraper):
         self._max_pages = max_pages
 
     async def fetch(self, location: str) -> list[Job]:
+        if fetcher.adaptive_enabled():
+            try:
+                jobs = await self._fetch_adaptive(location)
+                if jobs:
+                    return jobs
+                logger.debug("cambridge: adaptive yielded 0; using legacy path")
+            except Exception:
+                logger.exception("cambridge: adaptive path failed; using legacy")
+        return await self._fetch_legacy(location)
+
+    async def _fetch_adaptive(self, location: str) -> list[Job]:
+        jobs: list[Job] = []
+        seen_urls: set[str] = set()
+        for page in range(self._max_pages):
+            if len(jobs) >= _MAX_LISTINGS:
+                break
+            url = _LISTING_URL if page == 0 else f"{_LISTING_URL}?page={page}"
+            selector = await fetcher.fetch_selector(url, source="cambridge")
+            if selector is None:
+                return jobs
+            items = extract_items_adaptive(selector, url, seen_urls)
+            if not items:
+                break
+            for item in items:
+                if len(jobs) >= _MAX_LISTINGS:
+                    break
+                description = "Location: Cambridge, ON"
+                if item["department"]:
+                    description = f"Department: {item['department']}\n{description}"
+                detail_sel = await fetcher.fetch_selector(
+                    item["href"], source="cambridge"
+                )
+                if detail_sel is not None:
+                    body = extract_description_adaptive(detail_sel)
+                    if body:
+                        description = body
+                jobs.append(
+                    Job(
+                        id=make_job_id("cambridge", item["href"]),
+                        source="cambridge",
+                        title=item["title"],
+                        company="Cambridge Memorial Hospital",
+                        location="Cambridge, ON",
+                        url=item["href"],
+                        description=description,
+                        posted_at=None,
+                        first_seen=datetime.now(UTC).isoformat(),
+                        score=None,
+                        notified=False,
+                    )
+                )
+        return jobs
+
+    async def _fetch_legacy(self, location: str) -> list[Job]:
         jobs: list[Job] = []
         seen_urls: set[str] = set()
 

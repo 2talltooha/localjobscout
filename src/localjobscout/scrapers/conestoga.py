@@ -2,18 +2,68 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from typing import Any
 from urllib.parse import urljoin
 
 import httpx
 from bs4 import BeautifulSoup, Tag
 
 from localjobscout.db import Job, make_job_id
+from localjobscout.scrapers import fetcher
+from localjobscout.scrapers.adaptive import all_matches, first
 from localjobscout.scrapers.base import USER_AGENT, Scraper, polite_get
 
 logger = logging.getLogger(__name__)
 
 _LISTING_URL = "https://employment.conestogac.on.ca/"
 _MAX_LISTINGS = 100
+
+
+# ── Adaptive (self-healing) extraction ───────────────────────────────────────
+def extract_rows_adaptive(selector: Any) -> list[dict[str, str]]:
+    """Pull job rows from a conestoga listing Selector via adaptive selectors."""
+    rows = all_matches(
+        selector, "table.table.table-striped tr", identifier="conestoga_row_list"
+    )
+    out: list[dict[str, str]] = []
+    for row in rows:
+        if row.has_class("tableheader"):
+            continue
+        cells = all_matches(row, "td")
+        if len(cells) < 4:
+            continue
+        req_cell, title_cell, location_cell, closing_cell = cells[:4]
+        link = first(req_cell, "a")
+        if link is None:
+            continue
+        href = link.attrib.get("href")
+        if not href:
+            continue
+        title = str(title_cell.text or "").strip()
+        if not title:
+            continue
+        out.append(
+            {
+                "href": href,
+                "title": title,
+                "requisition": str(link.text or "").strip(),
+                "location": str(location_cell.text or "").strip(),
+                "closing": str(closing_cell.text or "").strip(),
+            }
+        )
+    return out
+
+
+def extract_description_adaptive(selector: Any) -> str:
+    sections: list[str] = []
+    for h2 in all_matches(selector, "div.col-12 h2", identifier="conestoga_detail_h2"):
+        parent = h2.find_ancestor(lambda e: e.has_class("col-12"))
+        if parent is None:
+            continue
+        text = " ".join(parent.get_all_text().split())
+        if len(text) > 30:
+            sections.append(text)
+    return "\n\n".join(sections)
 
 
 class ConestogaScraper(Scraper):
@@ -26,6 +76,56 @@ class ConestogaScraper(Scraper):
         self._max_pages = max_pages
 
     async def fetch(self, location: str) -> list[Job]:
+        if fetcher.adaptive_enabled():
+            try:
+                jobs = await self._fetch_adaptive(location)
+                if jobs:
+                    return jobs
+                logger.debug("conestoga: adaptive yielded 0; using legacy path")
+            except Exception:
+                logger.exception("conestoga: adaptive path failed; using legacy")
+        return await self._fetch_legacy(location)
+
+    async def _fetch_adaptive(self, location: str) -> list[Job]:
+        jobs: list[Job] = []
+        selector = await fetcher.fetch_selector(_LISTING_URL, source="conestoga")
+        if selector is None:
+            return jobs
+        for row in extract_rows_adaptive(selector):
+            if len(jobs) >= _MAX_LISTINGS:
+                break
+            detail_url = urljoin(_LISTING_URL, row["href"])
+            parts: list[str] = []
+            if row["requisition"]:
+                parts.append(f"Requisition: {row['requisition']}")
+            if row["location"]:
+                parts.append(f"Location: {row['location']}")
+            if row["closing"]:
+                parts.append(f"Closing: {row['closing']}")
+            description = "\n".join(parts)
+            detail_sel = await fetcher.fetch_selector(detail_url, source="conestoga")
+            if detail_sel is not None:
+                body = extract_description_adaptive(detail_sel)
+                if body:
+                    description = f"{description}\n\n{body}" if description else body
+            jobs.append(
+                Job(
+                    id=make_job_id("conestoga", detail_url),
+                    source="conestoga",
+                    title=row["title"],
+                    company="Conestoga College",
+                    location=row["location"],
+                    url=detail_url,
+                    description=description,
+                    posted_at=None,
+                    first_seen=datetime.now(UTC).isoformat(),
+                    score=None,
+                    notified=False,
+                )
+            )
+        return jobs
+
+    async def _fetch_legacy(self, location: str) -> list[Job]:
         jobs: list[Job] = []
 
         async with httpx.AsyncClient(

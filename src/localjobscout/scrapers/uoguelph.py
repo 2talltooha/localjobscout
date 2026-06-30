@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from typing import Any
 from urllib.parse import urljoin
 
 import httpx
 from bs4 import BeautifulSoup, Tag
 
 from localjobscout.db import Job, make_job_id
+from localjobscout.scrapers import fetcher
+from localjobscout.scrapers.adaptive import all_matches, first
 from localjobscout.scrapers.base import USER_AGENT, Scraper, polite_get
 
 logger = logging.getLogger(__name__)
@@ -17,6 +20,51 @@ _RESULTS_PER_PAGE = 20
 _MAX_LISTINGS = 100
 
 
+# ── Adaptive (self-healing) extraction ───────────────────────────────────────
+def extract_tiles_adaptive(selector: Any) -> list[dict[str, str]]:
+    """Pull job tiles from a uoguelph search Selector via adaptive selectors."""
+    tiles = all_matches(selector, "li.job-tile", identifier="uoguelph_tile_list")
+    out: list[dict[str, str]] = []
+    for tile in tiles:
+        link = first(tile, "a.jobTitle-link")
+        if link is None:
+            continue
+        href = link.attrib.get("href")
+        title = str(link.text or "").strip()
+        if not href or not title:
+            continue
+        out.append(
+            {
+                "href": href,
+                "title": title,
+                "location": _field_value_adaptive(tile, "location"),
+                "division": _field_value_adaptive(tile, "facility"),
+                "department": _field_value_adaptive(tile, "dept"),
+            }
+        )
+    return out
+
+
+def _field_value_adaptive(tile: Any, field_class: str) -> str:
+    divs = all_matches(tile, f".section-field.{field_class} div")
+    if not divs:
+        return ""
+    return str(divs[-1].text or "").strip()
+
+
+def extract_description_adaptive(selector: Any) -> str:
+    el = first(
+        selector,
+        'span[itemprop="description"] span.jobdescription',
+        identifier="uoguelph_job_desc",
+    )
+    if el is None:
+        el = first(selector, "span.jobdescription")
+    if el is None:
+        return ""
+    return " ".join(el.get_all_text().split()).strip()
+
+
 class UofGScraper(Scraper):
     name = "uoguelph"
 
@@ -24,6 +72,80 @@ class UofGScraper(Scraper):
         self._max_pages = max_pages
 
     async def fetch(self, location: str) -> list[Job]:
+        if fetcher.adaptive_enabled():
+            try:
+                jobs = await self._fetch_adaptive(location)
+                if jobs:
+                    return jobs
+                logger.debug("uoguelph: adaptive yielded 0; using legacy path")
+            except Exception:
+                logger.exception("uoguelph: adaptive path failed; using legacy")
+        return await self._fetch_legacy(location)
+
+    async def _fetch_adaptive(self, location: str) -> list[Job]:
+        jobs: list[Job] = []
+        seen_urls: set[str] = set()
+        for page in range(self._max_pages):
+            if len(jobs) >= _MAX_LISTINGS:
+                break
+            startrow = page * _RESULTS_PER_PAGE
+            url = f"{_SEARCH_BASE}?startrow={startrow}"
+            selector = await fetcher.fetch_selector(url, source="uoguelph")
+            if selector is None:
+                return jobs
+            tiles = extract_tiles_adaptive(selector)
+            if not tiles:
+                break
+            page_added = 0
+            for tile in tiles:
+                if len(jobs) >= _MAX_LISTINGS:
+                    break
+                detail_url = urljoin(url, tile["href"])
+                if detail_url in seen_urls:
+                    continue
+                seen_urls.add(detail_url)
+                description = self._build_description(
+                    tile["division"], tile["department"], tile["location"]
+                )
+                detail_sel = await fetcher.fetch_selector(
+                    detail_url, source="uoguelph"
+                )
+                if detail_sel is not None:
+                    body = extract_description_adaptive(detail_sel)
+                    if body:
+                        description = body
+                jobs.append(
+                    Job(
+                        id=make_job_id("uoguelph", detail_url),
+                        source="uoguelph",
+                        title=tile["title"],
+                        company="University of Guelph",
+                        location=tile["location"],
+                        url=detail_url,
+                        description=description,
+                        posted_at=None,
+                        first_seen=datetime.now(UTC).isoformat(),
+                        score=None,
+                        notified=False,
+                    )
+                )
+                page_added += 1
+            if page_added == 0:
+                break
+        return jobs
+
+    @staticmethod
+    def _build_description(division: str, department: str, location: str) -> str:
+        parts: list[str] = []
+        if division:
+            parts.append(f"Division: {division}")
+        if department:
+            parts.append(f"Department: {department}")
+        if location:
+            parts.append(f"Location: {location}")
+        return "\n".join(parts)
+
+    async def _fetch_legacy(self, location: str) -> list[Job]:
         jobs: list[Job] = []
         seen_urls: set[str] = set()
 

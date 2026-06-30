@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from typing import Any
 from urllib.parse import quote_plus, urljoin
 
 import httpx
 from bs4 import BeautifulSoup, Tag
 
 from localjobscout.db import Job, make_job_id
+from localjobscout.scrapers import fetcher
+from localjobscout.scrapers.adaptive import first as _first
+from localjobscout.scrapers.adaptive import first_text as _first_text
 from localjobscout.scrapers.base import USER_AGENT, Scraper, polite_get
 from localjobscout.url_utils import normalise_jobbank_url
 
@@ -17,6 +21,67 @@ _SEARCH_BASE = "https://www.jobbank.gc.ca/jobsearch/jobsearch"
 _MAX_LISTINGS = 100
 
 
+# ── Adaptive (self-healing) extraction ───────────────────────────────────────
+# These run against a Scrapling Selector. The brittle, layout-sensitive
+# selectors (card list + job description) are tagged with stable identifiers
+# and adaptive=True/auto_save=True (via scrapers.adaptive) so Scrapling
+# relocates them by fingerprint when JobBank changes its markup. Field
+# sub-selects stay plain.
+
+def extract_cards_adaptive(selector: Any) -> list[dict[str, str]]:
+    """Pull job cards from a JobBank search Selector via adaptive selectors."""
+    cards = selector.css(
+        "article a.resultJobItem",
+        identifier="jobbank_card_list",
+        adaptive=True,
+        auto_save=True,
+    )
+    out: list[dict[str, str]] = []
+    for card in cards:
+        href = card.attrib.get("href")
+        if not href:
+            continue
+        title = _first_text(card, ".noctitle")
+        if not title:
+            continue
+        out.append(
+            {
+                "href": href,
+                "title": title,
+                "company": _first_text(card, ".business"),
+                "location": _first_text(card, ".location"),
+            }
+        )
+    return out
+
+
+def extract_description_adaptive(selector: Any) -> tuple[str, str | None]:
+    """Pull description + posted_at from a JobBank detail Selector.
+
+    Mirrors the legacy ``_fetch_detail`` fallback chain: the dedicated
+    description block first, then the requirements block, then (when JobBank
+    serves a page without either) the paragraphs inside <main>.
+    """
+    el = _first(selector, "#jobDescriptionId", identifier="jobbank_job_desc")
+    if el is None:
+        el = _first(selector, ".job-posting-detail-requirements")
+    if el is not None:
+        description = " ".join(el.get_all_text().split())
+    else:
+        paragraphs = selector.css("main p")
+        description = " ".join(
+            " ".join(str(p.get_all_text()).split()) for p in paragraphs
+        ).strip()
+
+    posted_at: str | None = None
+    time_el = _first(selector, "time[datetime]")
+    if time_el is not None:
+        dt_val = time_el.attrib.get("datetime")
+        if dt_val:
+            posted_at = dt_val
+    return description.strip(), posted_at
+
+
 class JobBankScraper(Scraper):
     name = "jobbank"
 
@@ -24,7 +89,72 @@ class JobBankScraper(Scraper):
         self._max_pages = max_pages
         self._query = query
 
+    def _search_url(self, location: str, page: int) -> str:
+        url = (
+            f"{_SEARCH_BASE}"
+            f"?searchstring={quote_plus(self._query)}"
+            f"&locationstring={location}"
+        )
+        if page > 1:
+            url += f"&page={page}"
+        return url
+
     async def fetch(self, location: str) -> list[Job]:
+        # Phase 2: try adaptive self-healing selectors first; fall back to the
+        # proven BeautifulSoup path on any failure or empty result.
+        if fetcher.adaptive_enabled():
+            try:
+                jobs = await self._fetch_adaptive(location)
+                if jobs:
+                    return jobs
+                logger.debug("jobbank: adaptive yielded 0; using legacy path")
+            except Exception:
+                logger.exception("jobbank: adaptive path failed; using legacy")
+        return await self._fetch_legacy(location)
+
+    async def _fetch_adaptive(self, location: str) -> list[Job]:
+        jobs: list[Job] = []
+        for page in range(1, self._max_pages + 1):
+            if len(jobs) >= _MAX_LISTINGS:
+                break
+            url = self._search_url(location, page)
+            selector = await fetcher.fetch_selector(url, source="jobbank")
+            if selector is None:
+                # Adaptive fetch unavailable — bail so the caller falls back.
+                return jobs
+            cards = extract_cards_adaptive(selector)
+            if not cards:
+                break
+            for card in cards:
+                if len(jobs) >= _MAX_LISTINGS:
+                    break
+                detail_url = normalise_jobbank_url(urljoin(url, card["href"]))
+                description, posted_at = "", None
+                detail_sel = await fetcher.fetch_selector(
+                    detail_url, source="jobbank"
+                )
+                if detail_sel is not None:
+                    description, posted_at = extract_description_adaptive(
+                        detail_sel
+                    )
+                jobs.append(
+                    Job(
+                        id=make_job_id("jobbank", detail_url),
+                        source="jobbank",
+                        title=card["title"],
+                        company=card["company"],
+                        location=card["location"],
+                        url=detail_url,
+                        description=description,
+                        posted_at=posted_at,
+                        first_seen=datetime.now(UTC).isoformat(),
+                        score=None,
+                        notified=False,
+                    )
+                )
+        return jobs
+
+    async def _fetch_legacy(self, location: str) -> list[Job]:
         jobs: list[Job] = []
 
         async with httpx.AsyncClient(
