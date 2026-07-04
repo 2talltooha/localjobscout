@@ -19,17 +19,12 @@ from playwright.async_api import (
 )
 
 from localjobscout.db import Job, make_job_id
-from localjobscout.scrapers.base import Scraper
+from localjobscout.scrapers.base import CHROME_UA, Scraper
 
 logger = logging.getLogger(__name__)
 
 _BASE_URL = (
     "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
-)
-_BROWSER_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/120.0.0.0 Safari/537.36"
 )
 _PAGE_SIZE = 10
 _PAGE_TIMEOUT_MS = 15_000
@@ -131,7 +126,7 @@ class LinkedInPlaywrightScraper(Scraper):
                 )
                 try:
                     context = await browser.new_context(
-                        user_agent=_BROWSER_USER_AGENT,
+                        user_agent=CHROME_UA,
                     )
                     page = await context.new_page()
 

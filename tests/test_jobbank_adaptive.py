@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
+from urllib.parse import urljoin
 
 import pytest
 
@@ -9,10 +11,14 @@ pytest.importorskip("scrapling")
 
 from scrapling.parser import Selector  # noqa: E402
 
+from localjobscout.db import make_job_id  # noqa: E402
+from localjobscout.scrapers import fetcher  # noqa: E402
 from localjobscout.scrapers.jobbank import (  # noqa: E402
+    JobBankScraper,
     extract_cards_adaptive,
     extract_description_adaptive,
 )
+from localjobscout.url_utils import normalise_jobbank_url  # noqa: E402
 
 _SEARCH_HTML = """
 <html><body>
@@ -92,3 +98,42 @@ def test_card_selector_self_heals_after_layout_change(tmp_path: Path) -> None:
     healed = s2.css(css, identifier=ident, adaptive=True, auto_save=False)
     assert len(healed) >= 1
     assert healed[0].attrib.get("href") == "/job/1;jsessionid=ABC"
+
+
+@pytest.mark.asyncio
+async def test_known_ids_skips_detail_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A card whose computed job id is already in the DB skips the detail-page
+    fetch entirely — the fix for the adaptive scrapers re-downloading ~100
+    already-known postings' detail pages on every single hourly scan."""
+    search_sel = Selector(content=_SEARCH_HTML, adaptive=True)
+    detail_sel = Selector(content=_DETAIL_HTML, adaptive=True)
+
+    search_url = JobBankScraper(max_pages=1)._search_url("Waterloo, ON", 1)
+    known_url = normalise_jobbank_url(
+        urljoin(search_url, "/job/1;jsessionid=ABC")
+    )
+    known_id = make_job_id("jobbank", known_url)
+
+    detail_calls: list[str] = []
+
+    async def _fake_fetch_selector(
+        url: str, *, source: str | None = None, **_: object
+    ) -> Any:
+        if url == search_url:
+            return search_sel
+        detail_calls.append(url)
+        return detail_sel
+
+    monkeypatch.setattr(fetcher, "fetch_selector", _fake_fetch_selector)
+
+    scraper = JobBankScraper(max_pages=1, known_ids=frozenset({known_id}))
+    jobs = await scraper._fetch_adaptive("Waterloo, ON")
+
+    assert len(jobs) == 2
+    known_job = next(j for j in jobs if j.id == known_id)
+    assert known_job.description == ""  # detail fetch skipped for known job
+
+    unknown_job = next(j for j in jobs if j.id != known_id)
+    assert "sample prep" in unknown_job.description  # detail fetch happened
+
+    assert known_url not in detail_calls

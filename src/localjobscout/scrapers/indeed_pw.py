@@ -18,7 +18,7 @@ from playwright.async_api import (
 )
 
 from localjobscout.db import Job, make_job_id
-from localjobscout.scrapers.base import Scraper
+from localjobscout.scrapers.base import CHROME_UA, Scraper
 
 try:
     from playwright_stealth import Stealth
@@ -29,11 +29,6 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://ca.indeed.com/jobs"
-_BROWSER_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/120.0.0.0 Safari/537.36"
-)
 _PAGE_SIZE = 10
 _PAGE_TIMEOUT_MS = 20_000
 _BETWEEN_PAGES_SLEEP_S = 3.0
@@ -152,7 +147,7 @@ class IndeedPlaywrightScraper(Scraper):
                 )
                 try:
                     context = await browser.new_context(
-                        user_agent=_BROWSER_USER_AGENT,
+                        user_agent=CHROME_UA,
                     )
                     page = await context.new_page()
                     if _STEALTH_AVAILABLE:

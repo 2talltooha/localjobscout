@@ -69,11 +69,14 @@ def extract_description_adaptive(selector: Any) -> str:
 class ConestogaScraper(Scraper):
     name = "conestoga"
 
-    def __init__(self, max_pages: int = 1) -> None:
+    def __init__(
+        self, max_pages: int = 1, known_ids: frozenset[str] = frozenset()
+    ) -> None:
         # Conestoga renders all openings on a single page; max_pages is
         # accepted for config-shape uniformity but only the first page is
         # ever fetched.
         self._max_pages = max_pages
+        self._known_ids = known_ids
 
     async def fetch(self, location: str) -> list[Job]:
         if fetcher.adaptive_enabled():
@@ -95,6 +98,7 @@ class ConestogaScraper(Scraper):
             if len(jobs) >= _MAX_LISTINGS:
                 break
             detail_url = urljoin(_LISTING_URL, row["href"])
+            job_id = make_job_id("conestoga", detail_url)
             parts: list[str] = []
             if row["requisition"]:
                 parts.append(f"Requisition: {row['requisition']}")
@@ -103,14 +107,19 @@ class ConestogaScraper(Scraper):
             if row["closing"]:
                 parts.append(f"Closing: {row['closing']}")
             description = "\n".join(parts)
-            detail_sel = await fetcher.fetch_selector(detail_url, source="conestoga")
-            if detail_sel is not None:
-                body = extract_description_adaptive(detail_sel)
-                if body:
-                    description = f"{description}\n\n{body}" if description else body
+            if job_id not in self._known_ids:
+                detail_sel = await fetcher.fetch_selector(
+                    detail_url, source="conestoga"
+                )
+                if detail_sel is not None:
+                    body = extract_description_adaptive(detail_sel)
+                    if body:
+                        description = (
+                            f"{description}\n\n{body}" if description else body
+                        )
             jobs.append(
                 Job(
-                    id=make_job_id("conestoga", detail_url),
+                    id=job_id,
                     source="conestoga",
                     title=row["title"],
                     company="Conestoga College",

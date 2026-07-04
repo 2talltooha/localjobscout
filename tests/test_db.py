@@ -6,14 +6,21 @@ import pytest
 
 from localjobscout.db import (
     Job,
+    get_all_job_hashes,
+    get_all_job_ids,
+    get_cowork_candidates,
+    get_job_by_id,
     get_manual_queue_jobs,
     get_recent_jobs,
     get_unnotified_above,
     init_db,
     make_job_id,
     mark_notified,
+    set_suitability,
     update_score,
+    update_scores,
     upsert_job,
+    upsert_jobs,
 )
 
 
@@ -50,6 +57,33 @@ def test_duplicate_job_returns_false() -> None:
     job = _job()
     upsert_job(job)
     assert upsert_job(job) is False
+
+
+def test_upsert_refreshes_description_when_longer() -> None:
+    """A reseen job with a fuller description (e.g. enrichment/adaptive fetch
+    superseding a truncated snippet) updates the stored description in place."""
+    job = _job()
+    job.description = "short snippet"
+    upsert_job(job)
+
+    job.description = "A much longer, fully enriched job description body."
+    assert upsert_job(job) is False  # still a duplicate insert
+    stored = get_job_by_id(job.id)
+    assert stored is not None
+    assert stored.description == "A much longer, fully enriched job description body."
+
+
+def test_upsert_keeps_description_when_shorter() -> None:
+    """A reseen job with a shorter description never regresses the stored one."""
+    job = _job()
+    job.description = "A much longer, fully enriched job description body."
+    upsert_job(job)
+
+    job.description = "short snippet"
+    upsert_job(job)
+    stored = get_job_by_id(job.id)
+    assert stored is not None
+    assert stored.description == "A much longer, fully enriched job description body."
 
 
 def test_upsert_idempotent_no_duplicate_rows() -> None:
@@ -240,3 +274,105 @@ def test_manual_queue_blank_posted_at_falls_back_to_first_seen() -> None:
     upsert_job(job)
     ids = {j.id for j in get_manual_queue_jobs(0.0, min_date="2026-05-02")}
     assert job.id in ids
+
+
+# ---------------------------------------------------------------------------
+# get_cowork_candidates
+# ---------------------------------------------------------------------------
+
+
+def test_cowork_candidates_filters_by_threshold() -> None:
+    low = _job("Low Score", score=0.1)
+    high = _job("High Score", score=0.5)
+    upsert_job(low)
+    upsert_job(high)
+    ids = {j.id for j in get_cowork_candidates(0.3)}
+    assert high.id in ids
+    assert low.id not in ids
+
+
+def test_cowork_candidates_excludes_gate_blocked_by_default() -> None:
+    ok = _job("Qualified", score=0.5)
+    blocked = _job("Gate Blocked", score=0.5)
+    upsert_job(ok)
+    upsert_job(blocked)
+    set_suitability(blocked.id, 0.5, "reason", verdict="no")
+    ids = {j.id for j in get_cowork_candidates(0.3, gate_qualified=True)}
+    assert ok.id in ids
+    assert blocked.id not in ids
+
+
+def test_cowork_candidates_gate_qualified_false_includes_all() -> None:
+    ok = _job("Qualified", score=0.5)
+    blocked = _job("Gate Blocked", score=0.5)
+    upsert_job(ok)
+    upsert_job(blocked)
+    set_suitability(blocked.id, 0.5, "reason", verdict="no")
+    ids = {j.id for j in get_cowork_candidates(0.3, gate_qualified=False)}
+    assert ok.id in ids
+    assert blocked.id in ids
+
+
+def test_cowork_candidates_unscored_verdict_included() -> None:
+    job = _job("No Verdict Yet", score=0.5)
+    upsert_job(job)
+    ids = {j.id for j in get_cowork_candidates(0.3, gate_qualified=True)}
+    assert job.id in ids
+
+
+# ---------------------------------------------------------------------------
+# Batch helpers: upsert_jobs, get_all_job_hashes, get_all_job_ids, update_scores
+# ---------------------------------------------------------------------------
+
+
+def test_upsert_jobs_batch_returns_per_job_is_new_flags() -> None:
+    a = _job("Job A")
+    b = _job("Job B")
+    flags = upsert_jobs([a, b])
+    assert flags == [True, True]
+
+    flags2 = upsert_jobs([a, b])
+    assert flags2 == [False, False]
+
+
+def test_upsert_jobs_empty_list_returns_empty() -> None:
+    assert upsert_jobs([]) == []
+
+
+def test_get_all_job_hashes_reflects_stored_jobs() -> None:
+    job = _job("Hash Job")
+    job.job_hash = "abc123"
+    upsert_job(job)
+    assert "abc123" in get_all_job_hashes()
+
+
+def test_get_all_job_hashes_excludes_blank() -> None:
+    job = _job("No Hash Job")
+    job.job_hash = ""
+    upsert_job(job)
+    assert "" not in get_all_job_hashes()
+
+
+def test_get_all_job_ids_reflects_stored_jobs() -> None:
+    job = _job("Id Job")
+    upsert_job(job)
+    assert job.id in get_all_job_ids()
+
+
+def test_get_all_job_ids_empty_db() -> None:
+    assert get_all_job_ids() == set()
+
+
+def test_update_scores_batch_sets_values() -> None:
+    a = _job("Batch A")
+    b = _job("Batch B")
+    upsert_job(a)
+    upsert_job(b)
+    update_scores([(a.id, 0.6), (b.id, 0.9)])
+    results = {r.id: r.score for r in get_unnotified_above(0.0)}
+    assert results[a.id] == 0.6
+    assert results[b.id] == 0.9
+
+
+def test_update_scores_empty_list_no_op() -> None:
+    update_scores([])  # must not raise

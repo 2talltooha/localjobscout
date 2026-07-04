@@ -91,12 +91,14 @@ class ICIMSScraper(Scraper):
         company: str,
         city: str,
         max_pages: int = 3,
+        known_ids: frozenset[str] = frozenset(),
     ) -> None:
         self.name = name  # type: ignore[misc]  # per-instance source id
         self._subdomain = subdomain
         self._company = company
         self._city = city
         self._max_pages = max_pages
+        self._known_ids = known_ids
 
     @property
     def _base(self) -> str:
@@ -145,6 +147,8 @@ class ICIMSScraper(Scraper):
                 )
 
         for job in jobs[:_MAX_ENRICH]:
+            if job.id in self._known_ids:
+                continue
             detail_sel = await fetcher.fetch_selector(job.url, source=self.name)
             if detail_sel is None:
                 continue

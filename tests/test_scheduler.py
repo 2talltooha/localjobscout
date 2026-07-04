@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -8,13 +9,14 @@ from pytest_mock import MockerFixture
 
 from localjobscout import db
 from localjobscout.config import (
+    JobCategory,
     ScraperConfig,
     ScrapersConfig,
     Settings,
     TailorConfig,
 )
 from localjobscout.db import Job, make_job_id
-from localjobscout.scheduler import ScanResult, run_scan
+from localjobscout.scheduler import ScanResult, _run_forever_loop, run_scan
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -364,6 +366,85 @@ async def test_three_scrapers_enabled_and_called(
 
 
 @pytest.mark.asyncio
+async def test_scraper_concurrency_capped(
+    mocker: MockerFixture, tmp_path: Path
+) -> None:
+    """Category-query fan-out can create many scraper instances for one
+    board; run_scan must cap concurrent .fetch() calls at
+    fetch.max_concurrent_scrapers rather than launching all at once."""
+    settings = _settings(tmp_path)
+    settings.fetch.max_concurrent_scrapers = 2
+    _mock_resume(mocker)
+
+    current = 0
+    max_seen = 0
+    lock = asyncio.Lock()
+
+    async def _tracked_fetch(_location: str) -> list[Job]:
+        nonlocal current, max_seen
+        async with lock:
+            current += 1
+            max_seen = max(max_seen, current)
+        # A real suspension point (unaffected by the autouse asyncio.sleep
+        # patch) so overlapping fetches actually have a chance to overlap.
+        loop = asyncio.get_event_loop()
+        fut: asyncio.Future[None] = loop.create_future()
+        loop.call_later(0.02, fut.set_result, None)
+        await fut
+        async with lock:
+            current -= 1
+        return []
+
+    scrapers = []
+    for i in range(6):
+        s = MagicMock()
+        s.name = f"scraper{i}"
+        s.fetch = AsyncMock(side_effect=_tracked_fetch)
+        scrapers.append(s)
+
+    mocker.patch("localjobscout.scheduler._make_scrapers", return_value=scrapers)
+    mock_matcher = MagicMock()
+    mocker.patch("localjobscout.matcher.build_matcher", return_value=mock_matcher)
+
+    result = await run_scan(settings)
+
+    assert result.scrapers_run == 6
+    assert max_seen <= 2
+
+
+def test_make_scrapers_fans_out_one_jobbank_per_category_query(
+    tmp_path: Path,
+) -> None:
+    """Each category query spawns its own JobBank instance with that query."""
+    from localjobscout import scheduler
+
+    settings = _settings(tmp_path)
+    settings.categories = [
+        JobCategory(name="dev", queries=["junior developer", "it support"]),
+    ]
+    scrapers = scheduler._make_scrapers(settings)
+    jobbank_queries = [
+        s._query for s in scrapers if s.__class__.__name__ == "JobBankScraper"
+    ]
+    assert jobbank_queries == ["junior developer", "it support"]
+
+
+def test_make_scrapers_single_instance_without_category_queries(
+    tmp_path: Path,
+) -> None:
+    """No category queries → one JobBank instance using the board's own query."""
+    from localjobscout import scheduler
+
+    settings = _settings(tmp_path)
+    settings.scrapers.jobbank.query = "pharmacy assistant"
+    # default categories have empty queries
+    scrapers = scheduler._make_scrapers(settings)
+    jobbank = [s for s in scrapers if s.__class__.__name__ == "JobBankScraper"]
+    assert len(jobbank) == 1
+    assert jobbank[0]._query == "pharmacy assistant"
+
+
+@pytest.mark.asyncio
 async def test_excluded_jobs_not_scored(mocker: MockerFixture, tmp_path: Path) -> None:
     """Prefilter-excluded job gets score=-1.0 and is never passed to matcher."""
     settings = _settings(tmp_path)
@@ -393,7 +474,7 @@ async def test_excluded_jobs_not_scored(mocker: MockerFixture, tmp_path: Path) -
 async def test_excluded_jobs_receive_score_minus_one(
     mocker: MockerFixture, tmp_path: Path
 ) -> None:
-    """DB update_score(-1.0) called for excluded job."""
+    """DB update_scores([(id, -1.0)]) called for excluded job."""
     settings = _settings(tmp_path)
     job_excl = _job("Excluded Job")
 
@@ -408,11 +489,11 @@ async def test_excluded_jobs_receive_score_minus_one(
         return_value=(True, "matched phrase"),
     )
     mocker.patch("localjobscout.notifier.notify_match")
-    mock_update = mocker.patch("localjobscout.db.update_score")
+    mock_update = mocker.patch("localjobscout.db.update_scores")
 
     await run_scan(settings)
 
-    mock_update.assert_called_once_with(job_excl.id, -1.0)
+    mock_update.assert_any_call([(job_excl.id, -1.0)])
 
 
 @pytest.mark.asyncio
@@ -437,3 +518,48 @@ async def test_no_exclusions_jobs_excluded_zero(
 
     assert result.jobs_excluded == 0
     mock_matcher.score_jobs.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# _run_forever_loop — plain asyncio replacement for the old `schedule` lib
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_forever_loop_sleeps_full_interval_between_scans(
+    mocker: MockerFixture, tmp_path: Path
+) -> None:
+    """Each iteration: one run_scan, then sleep the full configured interval
+    (measured from scan completion) — no `schedule` lib wall-clock ticking."""
+    settings = _settings(tmp_path)
+    settings.scan_interval_minutes = 5
+
+    scan_result = ScanResult(
+        scrapers_run=1, jobs_seen=0, jobs_new=0,
+        jobs_excluded=0, jobs_notified=0, errors=0,
+    )
+    mock_run_scan = mocker.patch(
+        "localjobscout.scheduler.run_scan", new=AsyncMock(return_value=scan_result)
+    )
+    mocker.patch(
+        "localjobscout.export.write_matches_md", return_value=tmp_path / "m.md"
+    )
+
+    sleep_calls: list[float] = []
+
+    class _StopLoop(Exception):
+        pass
+
+    async def _fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+        raise _StopLoop  # stop after exactly one scan+sleep cycle
+
+    mocker.patch("localjobscout.scheduler.asyncio.sleep", side_effect=_fake_sleep)
+
+    console = MagicMock()
+
+    with pytest.raises(_StopLoop):
+        await _run_forever_loop(settings, console)
+
+    mock_run_scan.assert_called_once_with(settings)
+    assert sleep_calls == [300.0]  # 5 minutes, exact — no drift/jitter

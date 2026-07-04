@@ -1,42 +1,25 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 from abc import ABC, abstractmethod
 from typing import ClassVar
-from urllib.parse import urlparse
-from urllib.robotparser import RobotFileParser
 
 import httpx
 
 from localjobscout.db import Job
-from localjobscout.scrapers import fetcher
+from localjobscout.scrapers import fetcher, politeness
 
 logger = logging.getLogger(__name__)
 
-USER_AGENT = "LocalJobScout/0.1 (personal use)"
+USER_AGENT = politeness.USER_AGENT
 
-_robots_cache: dict[str, RobotFileParser] = {}
-
-
-async def _get_robots(client: httpx.AsyncClient, host: str) -> RobotFileParser:
-    if host in _robots_cache:
-        return _robots_cache[host]
-
-    parser = RobotFileParser()
-    robots_url = f"https://{host}/robots.txt"
-    try:
-        resp = await client.get(robots_url, follow_redirects=True, timeout=10.0)
-        if resp.status_code < 400:
-            parser.parse(resp.text.splitlines())
-        else:
-            # Treat inaccessible robots.txt as allowing everything.
-            parser.allow_all = True  # type: ignore[attr-defined]
-    except httpx.HTTPError:
-        parser.allow_all = True  # type: ignore[attr-defined]
-
-    _robots_cache[host] = parser
-    return parser
+# Real-browser UA for hosts that reject the identifying USER_AGENT above
+# (Workday CXS, Playwright-driven Indeed/LinkedIn, liveness checks). Single
+# source of truth — was duplicated verbatim across 5 modules.
+CHROME_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
 
 
 async def polite_get(
@@ -46,22 +29,24 @@ async def polite_get(
     delay_seconds: float = 2.0,
     source: str | None = None,
 ) -> httpx.Response | None:
-    """Fetch a URL politely (robots + delay), preferring the Scrapling adapter.
+    """Fetch a URL politely (robots + per-host rate limit), preferring the
+    Scrapling adapter.
+
+    The robots check and rate limiter live in ``scrapers.politeness`` and are
+    shared with ``fetcher.fetch_selector`` — every fetch, on either engine,
+    respects the same per-host minimum interval instead of a flat pre-request
+    sleep only this function knew about.
 
     When the fetch adapter is active it handles the GET (anti-bot resilient)
     and the result is wrapped in an ``httpx.Response`` so callers are
     unchanged. If the adapter is inactive or fails, this falls back to the
     original httpx GET — identical to pre-integration behaviour.
     """
-    parsed = urlparse(url)
-    host = parsed.netloc
-
-    robots = await _get_robots(client, host)
-    if not robots.can_fetch(USER_AGENT, url):
+    if not await politeness.can_fetch(url, USER_AGENT):
         logger.warning("robots.txt disallows %s for %s", url, USER_AGENT)
         return None
 
-    await asyncio.sleep(delay_seconds)
+    await politeness.throttle(url, delay_seconds)
 
     # ── Preferred path: Scrapling fetch adapter ──────────────────────────────
     if fetcher.is_active() and not fetcher.should_bypass(source):
@@ -70,7 +55,11 @@ async def polite_get(
             logger.debug(
                 "fetched %s via scrapling:%s", url, result.engine_used
             )
-            return httpx.Response(status_code=result.status, html=result.html)
+            return httpx.Response(
+                status_code=result.status,
+                html=result.html,
+                request=httpx.Request("GET", url),
+            )
         logger.debug(
             "scrapling fetch unusable for %s (%s); falling back to httpx",
             url, result.reason,

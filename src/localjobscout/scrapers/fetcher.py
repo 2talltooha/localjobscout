@@ -27,7 +27,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from localjobscout.scrapers import politeness
 
 if TYPE_CHECKING:
     from localjobscout.config import FetchConfig
@@ -59,9 +62,38 @@ _config: FetchConfig | None = None
 
 
 def configure(config: FetchConfig | None) -> None:
-    """Enable/disable the adapter and set engine policy. Call once per run."""
+    """Enable/disable the adapter and set engine policy. Call once per run.
+
+    When ``config.adaptive`` is set and Scrapling is installed, configures the
+    Scrapling fetchers globally for adaptive selectors (persistent fingerprint
+    storage), so ``fetch_selector`` returns adaptive-enabled Selectors.
+    """
     global _config
     _config = config
+    if (
+        config is not None
+        and config.enabled
+        and config.adaptive
+        and SCRAPLING_AVAILABLE
+    ):
+        _configure_adaptive(config.adaptive_storage)
+
+
+def _configure_adaptive(storage_file: str) -> None:
+    """Point the Scrapling fetchers at a persistent adaptive fingerprint store."""
+    try:
+        Path(storage_file).parent.mkdir(parents=True, exist_ok=True)
+        args = {"storage_args": {"storage_file": storage_file}, "adaptive": True}
+        for cls in (_Fetcher, _StealthyFetcher):
+            if cls is not None and hasattr(cls, "configure"):
+                cls.configure(**args)
+    except Exception as exc:  # noqa: BLE001 - adaptive is best-effort
+        logger.warning("could not configure scrapling adaptive storage: %s", exc)
+
+
+def adaptive_enabled() -> bool:
+    """True when adaptive self-healing selectors are active this process."""
+    return is_active() and _config is not None and _config.adaptive
 
 
 def reset() -> None:
@@ -134,8 +166,9 @@ def _extract_status(page: Any) -> int:
 
 def _plain_fetch(url: str, timeout: float) -> Any:
     """Blocking Scrapling Fetcher.get with version-tolerant kwargs."""
+    to = max(1, round(timeout))
     try:
-        return _Fetcher.get(url, timeout=int(timeout), stealthy_headers=True)
+        return _Fetcher.get(url, timeout=to, stealthy_headers=True)
     except TypeError:
         # Older/newer signatures: retry without optional kwargs, then as
         # an instance method if .get is not a classmethod.
@@ -147,15 +180,43 @@ def _plain_fetch(url: str, timeout: float) -> Any:
 
 def _stealth_fetch(url: str, timeout: float) -> Any:
     """Blocking Scrapling StealthyFetcher.fetch with version-tolerant kwargs."""
+    to_ms = max(1, round(timeout * 1000))
     try:
         return _StealthyFetcher.fetch(
-            url, headless=True, network_idle=True, timeout=int(timeout) * 1000
+            url, headless=True, network_idle=True, timeout=to_ms
         )
     except TypeError:
         try:
             return _StealthyFetcher.fetch(url)
         except TypeError:
             return _StealthyFetcher().fetch(url)
+
+
+async def _fetch_raw(
+    url: str,
+    *,
+    source: str | None,
+    engine: str | None,
+    timeout: float | None,
+) -> tuple[Any | None, str, str]:
+    """Resolve the engine and run the blocking Scrapling fetch off-thread.
+
+    Shared by fetch_page/fetch_selector so engine resolution, timeout
+    handling, and failure logging live in one place. Returns
+    ``(page, engine_used, error_reason)`` — page is None (with a non-empty
+    error_reason) on any engine exception; never raises.
+    """
+    eng = resolve_engine(source, override=engine)
+    to = timeout if timeout is not None else (
+        _config.timeout if _config is not None else 20.0
+    )
+    fn = _stealth_fetch if eng == "stealth" else _plain_fetch
+    try:
+        page = await asyncio.to_thread(fn, url, to)
+    except Exception as exc:  # noqa: BLE001 - any engine failure → fallback
+        logger.warning("scrapling %s fetch failed for %s: %s", eng, url, exc)
+        return None, eng, f"{type(exc).__name__}: {exc}"
+    return page, eng, ""
 
 
 async def fetch_page(
@@ -175,20 +236,11 @@ async def fetch_page(
             url=url, ok=False, reason="adapter inactive (scrapling off/missing)"
         )
 
-    eng = resolve_engine(source, override=engine)
-    to = timeout if timeout is not None else (
-        _config.timeout if _config is not None else 20.0
+    page, eng, error_reason = await _fetch_raw(
+        url, source=source, engine=engine, timeout=timeout
     )
-
-    fn = _stealth_fetch if eng == "stealth" else _plain_fetch
-    try:
-        page = await asyncio.to_thread(fn, url, to)
-    except Exception as exc:  # noqa: BLE001 - any engine failure → fallback
-        logger.warning("scrapling %s fetch failed for %s: %s", eng, url, exc)
-        return FetchResult(
-            url=url, ok=False, engine_used=eng,
-            reason=f"{type(exc).__name__}: {exc}",
-        )
+    if page is None:
+        return FetchResult(url=url, ok=False, engine_used=eng, reason=error_reason)
 
     html = _extract_html(page)
     status = _extract_status(page)
@@ -198,3 +250,47 @@ async def fetch_page(
         engine_used=eng,
         reason="" if ok else f"empty html or status {status}",
     )
+
+
+async def fetch_selector(
+    url: str,
+    *,
+    source: str | None = None,
+    engine: str | None = None,
+    timeout: float | None = None,
+    delay_seconds: float | None = None,
+) -> Any | None:
+    """Fetch and return the live Scrapling Selector (adaptive-capable).
+
+    Unlike ``fetch_page`` (which returns HTML for the legacy parsers), this
+    returns the Scrapling Response/Selector object so a parser can call
+    ``.css(sel, identifier=..., adaptive=True, auto_save=True)`` for
+    self-healing extraction. Returns ``None`` when the adapter is inactive,
+    the source is bypassed, robots.txt disallows the URL, or the fetch fails
+    — the caller then falls back to its built-in BeautifulSoup path.
+
+    This is the *only* politeness gate for the 10 adaptive scrapers that call
+    it directly (they don't go through ``base.polite_get``), so robots.txt
+    and the per-host rate limiter live here rather than assuming a caller
+    already checked them.
+    """
+    if not is_active() or should_bypass(source):
+        return None
+
+    if not await politeness.can_fetch(url):
+        logger.warning("robots.txt disallows %s for %s", url, politeness.USER_AGENT)
+        return None
+    delay = delay_seconds if delay_seconds is not None else (
+        _config.request_delay_seconds if _config is not None else 2.0
+    )
+    await politeness.throttle(url, delay)
+
+    page, _eng, _reason = await _fetch_raw(
+        url, source=source, engine=engine, timeout=timeout
+    )
+    if page is None:
+        return None
+
+    if _extract_status(page) >= 400 or not _extract_html(page):
+        return None
+    return page

@@ -85,9 +85,18 @@ def extract_description_adaptive(selector: Any) -> tuple[str, str | None]:
 class JobBankScraper(Scraper):
     name = "jobbank"
 
-    def __init__(self, max_pages: int = 3, query: str = "") -> None:
+    def __init__(
+        self,
+        max_pages: int = 3,
+        query: str = "",
+        known_ids: frozenset[str] = frozenset(),
+    ) -> None:
         self._max_pages = max_pages
         self._query = query
+        # Job ids already in the DB (from a prior scan) — the adaptive path
+        # skips the detail-page fetch for these instead of re-downloading a
+        # description that's already stored, every hourly scan, forever.
+        self._known_ids = known_ids
 
     def _search_url(self, location: str, page: int) -> str:
         url = (
@@ -129,17 +138,19 @@ class JobBankScraper(Scraper):
                 if len(jobs) >= _MAX_LISTINGS:
                     break
                 detail_url = normalise_jobbank_url(urljoin(url, card["href"]))
+                job_id = make_job_id("jobbank", detail_url)
                 description, posted_at = "", None
-                detail_sel = await fetcher.fetch_selector(
-                    detail_url, source="jobbank"
-                )
-                if detail_sel is not None:
-                    description, posted_at = extract_description_adaptive(
-                        detail_sel
+                if job_id not in self._known_ids:
+                    detail_sel = await fetcher.fetch_selector(
+                        detail_url, source="jobbank"
                     )
+                    if detail_sel is not None:
+                        description, posted_at = extract_description_adaptive(
+                            detail_sel
+                        )
                 jobs.append(
                     Job(
-                        id=make_job_id("jobbank", detail_url),
+                        id=job_id,
                         source="jobbank",
                         title=card["title"],
                         company=card["company"],

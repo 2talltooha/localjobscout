@@ -4,13 +4,21 @@ import pytest
 from spacy.language import Language
 
 from localjobscout.config import (
+    BlendConfig,
     FocusConfig,
     SalaryConfig,
     ScrapersConfig,
     Settings,
 )
 from localjobscout.db import Job, make_job_id
-from localjobscout.matcher import SemanticMatcher, TfidfMatcher, build_matcher
+from localjobscout.matcher import (
+    SemanticMatcher,
+    TfidfMatcher,
+    _apply_blend,
+    _compile_keywords,
+    _target_fit,
+    build_matcher,
+)
 from localjobscout.resume import preprocess
 
 
@@ -164,6 +172,23 @@ def test_focus_boost_increases_score(nlp: Language) -> None:
     base_score = no_boost.score_jobs(RESUME, [job])[0][1]
     boosted_score = with_boost.score_jobs(RESUME, [job])[0][1]
     assert boosted_score > base_score
+
+
+def test_focus_boost_ignores_substring_matches(nlp: Language) -> None:
+    """'lab' must not match inside 'collaborate' — word-boundary only."""
+    job = _job(
+        "collab-role", "Collaborate with the database team on integrations."
+    )
+    no_boost = TfidfMatcher(nlp, focus=FocusConfig())
+    with_boost = TfidfMatcher(
+        nlp,
+        focus=FocusConfig(
+            keywords=["lab", "data"], boost_per_hit=0.1, max_boost=0.5
+        ),
+    )
+    base_score = no_boost.score_jobs(RESUME, [job])[0][1]
+    boosted_score = with_boost.score_jobs(RESUME, [job])[0][1]
+    assert boosted_score == pytest.approx(base_score)
 
 
 def test_focus_boost_capped_at_max_boost(nlp: Language) -> None:
@@ -430,3 +455,79 @@ def test_salary_boost_disabled_leaves_scores_equal(nlp: Language) -> None:
         (j.id, s) for j, s in matcher.score_jobs(RESUME, [paid, unpaid])
     )
     assert scored[paid.id] == scored[unpaid.id]
+
+
+# ---------------------------------------------------------------------------
+# Scoring blend (Step 2): combined = w_resume*resume_fit + w_target*target_fit
+# ---------------------------------------------------------------------------
+
+
+def test_target_fit_title_hit_weighted_and_saturated() -> None:
+    blend = BlendConfig(
+        enabled=True,
+        target_keywords=["python", "django"],
+        title_boost_multiplier=2.0,
+        target_saturation=6.0,
+    )
+    # "python" in title → 2.0; "django" in desc → 1.0; total 3.0 / 6.0 = 0.5
+    job = _job("python-dev", "Build services with Django and PostgreSQL.")
+    patterns = _compile_keywords(blend.target_keywords)
+    assert _target_fit(job, blend, patterns) == pytest.approx(0.5)
+
+
+def test_target_fit_zero_without_keywords() -> None:
+    blend = BlendConfig(enabled=True, target_keywords=[])
+    patterns = _compile_keywords(blend.target_keywords)
+    assert _target_fit(_job("x", "anything"), blend, patterns) == 0.0
+
+
+def test_apply_blend_combines_weights() -> None:
+    blend = BlendConfig(
+        enabled=True,
+        w_resume=0.6,
+        w_target=0.4,
+        target_keywords=["python"],
+        title_boost_multiplier=2.0,
+        target_saturation=2.0,  # one title hit → target_fit = 1.0
+    )
+    job = _job("python-role", "no keyword here")  # title has 'python'
+    # resume_fit = 0.5; target_fit = 1.0 → 0.6*0.5 + 0.4*1.0 = 0.7
+    out = _apply_blend([(job, 0.5)], blend)
+    assert out[0][1] == pytest.approx(0.7)
+
+
+def test_blend_active_skips_focus_boost(nlp: Language) -> None:
+    """With blend enabled, the legacy focus boost is NOT applied — relevance
+    comes from target_fit instead."""
+    job = _job("python-clinical", "Python developer for clinical research.")
+    focus = FocusConfig(keywords=["clinical"], boost_per_hit=0.5, max_boost=0.5)
+    # blend with no target keywords → target_fit 0 → combined = w_resume*cosine
+    blend = BlendConfig(enabled=True, w_resume=1.0, w_target=0.0, target_keywords=[])
+    blended = TfidfMatcher(nlp, focus=focus, blend=blend)
+    plain = TfidfMatcher(nlp, focus=FocusConfig(keywords=[]))
+    # focus boost would have lifted the score; blend ignores it
+    assert blended.score_jobs(RESUME, [job])[0][1] == pytest.approx(
+        plain.score_jobs(RESUME, [job])[0][1]
+    )
+
+
+def test_build_matcher_wires_active_profile_blend(nlp: Language) -> None:
+    """build_matcher attaches a blend from the active profile (broad default)."""
+    settings = _settings()
+    m = build_matcher(settings, nlp)
+    assert isinstance(m, TfidfMatcher)
+    assert m._blend is not None and m._blend.enabled
+    # broad profile = all enabled category keywords as target keywords
+    assert "software" in m._blend.target_keywords
+    assert m._blend.w_resume == pytest.approx(0.6)
+
+
+def test_biomed_profile_narrows_target_keywords(nlp: Language) -> None:
+    settings = _settings(active_profile="biomed")
+    m = build_matcher(settings, nlp)
+    assert isinstance(m, TfidfMatcher)
+    assert m._blend is not None
+    # biomed targets lab_research only → no dev keywords
+    assert "research" in m._blend.target_keywords
+    assert "software" not in m._blend.target_keywords
+    assert m._blend.w_target == pytest.approx(0.6)

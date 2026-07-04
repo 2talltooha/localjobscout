@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 
 from localjobscout.db import Job, make_job_id
-from localjobscout.scrapers.base import Scraper
+from localjobscout.scrapers.base import CHROME_UA, Scraper
 
 logger = logging.getLogger(__name__)
 
@@ -18,10 +18,6 @@ _CXS_URL = (
 )
 _BASE_JOB_URL = "https://uwaterloo.wd3.myworkdayjobs.com/uw_careers"
 _RESULTS_PER_PAGE = 20
-_CHROME_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-)
 _COMPANY = "University of Waterloo"
 
 
@@ -73,7 +69,7 @@ class UWaterlooScraper(Scraper):
         jobs: list[Job] = []
         headers = {
             "Content-Type": "application/json",
-            "User-Agent": _CHROME_UA,
+            "User-Agent": CHROME_UA,
             "Accept": "application/json,*/*",
         }
 

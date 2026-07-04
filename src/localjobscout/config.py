@@ -415,8 +415,25 @@ class FetchConfig(BaseModel):
     legacy_sources: list[str] = Field(
         default_factory=lambda: ["remoteok"]
     )
+    # Phase 2: adaptive self-healing selectors. When True, Scrapling fetches
+    # carry adaptive=True and parsers that opt in fingerprint elements
+    # (auto_save) so a selector that breaks on a layout change is relocated by
+    # similarity. Requires the adapter active; parsers fall back to BS4 when a
+    # Scrapling Selector is unavailable.
+    adaptive: bool = True
+    # SQLite store for adaptive element fingerprints. Persists across runs.
+    adaptive_storage: str = "data/scrapling/adaptive.db"
     # Fetch timeout (seconds) handed to the Scrapling engine.
     timeout: float = 20.0
+    # Minimum seconds between two requests to the same host, enforced by
+    # scrapers.politeness — shared by the legacy httpx path and every direct
+    # fetch_selector() call the adaptive scrapers make.
+    request_delay_seconds: float = 2.0
+    # Cap on scrapers running .fetch() concurrently in one scan. Without this,
+    # each enabled category query spins up its own scraper instance (up to
+    # max_intake_queries of them per board), so e.g. 8 queries meant 8
+    # concurrent Playwright browsers and 8 simultaneous hits on jobbank.gc.ca.
+    max_concurrent_scrapers: int = 4
 
 
 class Settings(BaseSettings):

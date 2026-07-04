@@ -163,51 +163,119 @@ def init_db(db_path: Path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with _get_conn(db_path) as conn:
         conn.executescript(_SCHEMA)
+        existing_cols = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(jobs)")
+        }
         for stmt in _COLUMN_MIGRATIONS:
-            try:
+            # "ALTER TABLE jobs ADD COLUMN <name> <type>" — only run migrations
+            # for columns this DB doesn't have yet, instead of firing every
+            # ALTER on every startup and swallowing the resulting error.
+            col_name = stmt.split("ADD COLUMN", 1)[1].split()[0]
+            if col_name not in existing_cols:
                 conn.execute(stmt)
-            except sqlite3.OperationalError:
-                pass  # column already exists
+                existing_cols.add(col_name)
         for stmt in _INDEX_MIGRATIONS:
-            try:
-                conn.execute(stmt)
-            except sqlite3.OperationalError:
-                pass  # missing column / already exists
+            conn.execute(stmt)  # CREATE INDEX IF NOT EXISTS is already idempotent
+
+
+def _upsert_job_conn(conn: sqlite3.Connection, job: Job) -> bool:
+    """Insert *job* on *conn* if its id is not already present. Returns True
+    on a new insert. Shared by upsert_job (one connection) and upsert_jobs
+    (one connection for the whole batch)."""
+    cursor = conn.execute(
+        """
+        INSERT OR IGNORE INTO jobs
+            (id, source, title, company, location, url, description,
+             posted_at, first_seen, score, notified,
+             salary_min, salary_max, job_type, skills, job_hash, deadline)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            job.id,
+            job.source,
+            job.title,
+            job.company or None,
+            job.location or None,
+            job.url,
+            job.description,
+            job.posted_at,
+            job.first_seen,
+            job.score,
+            int(job.notified),
+            job.salary_min,
+            job.salary_max,
+            job.job_type or None,
+            json.dumps(job.skills) if job.skills else None,
+            job.job_hash or None,
+            job.deadline,
+        ),
+    )
+    is_new = cursor.rowcount == 1
+    if not is_new and job.description:
+        conn.execute(
+            """UPDATE jobs SET description = ?
+               WHERE id = ? AND length(?) > length(description)""",
+            (job.description, job.id, job.description),
+        )
+    return is_new
 
 
 def upsert_job(job: Job) -> bool:
-    """Insert *job* if its id is not already present. Returns True on a new insert."""
+    """Insert *job* if its id is not already present. Returns True on a new insert.
+
+    When the job already exists and the newly-scraped description is longer
+    than the stored one (e.g. an adaptive/enrichment fetch superseding an old
+    truncated snippet), the description is refreshed in place.
+    """
+    db_path = _require_db()
+    with _get_conn(db_path) as conn:
+        return _upsert_job_conn(conn, job)
+
+
+def upsert_jobs(jobs: list[Job]) -> list[bool]:
+    """Batch upsert_job over one connection/transaction instead of one
+    connection per job. Returns per-job is_new flags, same order as *jobs*."""
+    if not jobs:
+        return []
+    db_path = _require_db()
+    with _get_conn(db_path) as conn:
+        return [_upsert_job_conn(conn, job) for job in jobs]
+
+
+def get_all_job_hashes() -> set[str]:
+    """Every non-empty job_hash currently in the DB, in one query — lets a
+    whole scan's worth of jobs be cross-source-deduped in memory instead of
+    one ``hash_exists_in_db`` round trip per job."""
     db_path = _require_db()
     with _get_conn(db_path) as conn:
         cursor = conn.execute(
-            """
-            INSERT OR IGNORE INTO jobs
-                (id, source, title, company, location, url, description,
-                 posted_at, first_seen, score, notified,
-                 salary_min, salary_max, job_type, skills, job_hash, deadline)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                job.id,
-                job.source,
-                job.title,
-                job.company or None,
-                job.location or None,
-                job.url,
-                job.description,
-                job.posted_at,
-                job.first_seen,
-                job.score,
-                int(job.notified),
-                job.salary_min,
-                job.salary_max,
-                job.job_type or None,
-                json.dumps(job.skills) if job.skills else None,
-                job.job_hash or None,
-                job.deadline,
-            ),
+            "SELECT DISTINCT job_hash FROM jobs "
+            "WHERE job_hash IS NOT NULL AND job_hash != ''"
         )
-        return cursor.rowcount == 1
+        return {str(row[0]) for row in cursor.fetchall()}
+
+
+def get_all_job_ids() -> set[str]:
+    """Every job id currently in the DB, in one query — lets scrapers skip
+    re-fetching detail pages for jobs already known before hitting the
+    network (make_job_id is deterministic from source+url)."""
+    db_path = _require_db()
+    with _get_conn(db_path) as conn:
+        cursor = conn.execute("SELECT id FROM jobs")
+        return {str(row[0]) for row in cursor.fetchall()}
+
+
+def update_scores(pairs: list[tuple[str, float]]) -> None:
+    """Batch update_score over one connection/transaction. *pairs* are
+    (job_id, score)."""
+    if not pairs:
+        return
+    db_path = _require_db()
+    with _get_conn(db_path) as conn:
+        conn.executemany(
+            "UPDATE jobs SET score = ? WHERE id = ?",
+            [(score, job_id) for job_id, score in pairs],
+        )
 
 
 def update_score(job_id: str, score: float) -> None:
@@ -332,8 +400,10 @@ def log_alert(matched_count: int, job_ids: list[str], filter_used: str) -> None:
 
 
 def _row_to_job(row: sqlite3.Row) -> Job:
-    keys = row.keys()
-    skills_raw = row["skills"] if "skills" in keys else None
+    # SELECT * always runs against a DB that init_db() has fully migrated, so
+    # every column below is guaranteed present — no per-row "col in keys" guard
+    # needed.
+    skills_raw = row["skills"]
     skills: list[str] = json.loads(skills_raw) if skills_raw else []
     return Job(
         id=row["id"],
@@ -347,46 +417,26 @@ def _row_to_job(row: sqlite3.Row) -> Job:
         first_seen=row["first_seen"],
         score=row["score"],
         notified=bool(row["notified"]),
-        salary_min=row["salary_min"] if "salary_min" in keys else None,
-        salary_max=row["salary_max"] if "salary_max" in keys else None,
-        job_type=row["job_type"] or "" if "job_type" in keys else "",
+        salary_min=row["salary_min"],
+        salary_max=row["salary_max"],
+        job_type=row["job_type"] or "",
         skills=skills,
-        job_hash=row["job_hash"] or "" if "job_hash" in keys else "",
-        application_status=(
-            row["application_status"]
-            if "application_status" in keys
-            else None
-        ),
-        applied_at=row["applied_at"] if "applied_at" in keys else None,
-        cover_letter_path=(
-            row["cover_letter_path"]
-            if "cover_letter_path" in keys
-            else None
-        ),
-        application_notes=(
-            row["application_notes"]
-            if "application_notes" in keys
-            else None
-        ),
+        job_hash=row["job_hash"] or "",
+        application_status=row["application_status"],
+        applied_at=row["applied_at"],
+        cover_letter_path=row["cover_letter_path"],
+        application_notes=row["application_notes"],
         suitability_score=(
             float(row["suitability_score"])
-            if "suitability_score" in keys and row["suitability_score"] is not None
+            if row["suitability_score"] is not None
             else None
         ),
-        suitability_reason=(
-            row["suitability_reason"]
-            if "suitability_reason" in keys
-            else None
-        ),
-        deadline=row["deadline"] if "deadline" in keys else None,
-        qualification_verdict=(
-            row["qualification_verdict"]
-            if "qualification_verdict" in keys
-            else None
-        ),
+        suitability_reason=row["suitability_reason"],
+        deadline=row["deadline"],
+        qualification_verdict=row["qualification_verdict"],
         unmet_requirements=(
             json.loads(row["unmet_requirements"])
-            if "unmet_requirements" in keys and row["unmet_requirements"]
+            if row["unmet_requirements"]
             else []
         ),
     )
@@ -657,6 +707,22 @@ def set_gap_report(job_id: str, master_hash: str, report_json: str) -> None:
                VALUES (?, ?, ?, ?)""",
             (job_id, master_hash, report_json, datetime.now(UTC).isoformat()),
         )
+
+
+def get_cowork_candidates(threshold: float, gate_qualified: bool = True) -> list[Job]:
+    """Jobs eligible for Cowork export: score >= threshold, optionally
+    excluding qualification_verdict == 'no' (mirrors get_manual_queue_jobs'
+    gate). Filters in SQL instead of loading the full table into Python."""
+    db_path = _require_db()
+    sql = "SELECT * FROM jobs WHERE score >= ?"
+    params: list[float | str] = [threshold]
+    if gate_qualified:
+        sql += " AND (qualification_verdict IS NULL OR qualification_verdict != 'no')"
+    sql += " ORDER BY first_seen DESC"
+    with _get_conn(db_path) as conn:
+        cursor = conn.execute(sql, params)
+        rows = cursor.fetchall()
+    return [_row_to_job(row) for row in rows]
 
 
 def get_applied_jobs(status: str | None = None) -> list[Job]:

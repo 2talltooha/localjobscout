@@ -7,19 +7,19 @@ import pytest
 
 from localjobscout.config import FetchConfig
 from localjobscout.scrapers import base as scraper_base
-from localjobscout.scrapers import fetcher
+from localjobscout.scrapers import fetcher, politeness
 
 
 @pytest.fixture
 def allow_all_robots(monkeypatch: pytest.MonkeyPatch) -> None:
     """Bypass the robots.txt fetch so polite_get tests do no network I/O."""
 
-    async def _permissive(_client: object, _host: str) -> RobotFileParser:
+    async def _permissive(_host: str) -> RobotFileParser:
         parser = RobotFileParser()
         parser.allow_all = True  # type: ignore[attr-defined]
         return parser
 
-    monkeypatch.setattr(scraper_base, "_get_robots", _permissive)
+    monkeypatch.setattr(politeness, "get_robots", _permissive)
 
 
 def test_inactive_by_default() -> None:
@@ -129,3 +129,76 @@ async def test_polite_get_falls_back_when_adapter_fails(
     assert calls == ["https://jobbank.gc.ca/y"]
     assert resp is not None
     assert resp.text == "<p>httpx body</p>"
+
+
+@pytest.mark.asyncio
+async def test_fetch_selector_blocked_by_robots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """fetch_selector is the only politeness gate for the adaptive scrapers
+    (they call it directly, bypassing polite_get) — robots.txt must still be
+    enforced here."""
+    fetcher.configure(FetchConfig())
+    monkeypatch.setattr(fetcher, "is_active", lambda: True)
+
+    async def _disallow(_url: str, _user_agent: str = "") -> bool:
+        return False
+
+    monkeypatch.setattr(politeness, "can_fetch", _disallow)
+
+    called = False
+
+    async def _spy_raw(*_a: object, **_k: object) -> tuple[None, str, str]:
+        nonlocal called
+        called = True
+        return None, "plain", ""
+
+    monkeypatch.setattr(fetcher, "_fetch_raw", _spy_raw)
+
+    try:
+        result = await fetcher.fetch_selector(
+            "https://example.com/blocked", source="jobbank"
+        )
+    finally:
+        fetcher.reset()
+
+    assert result is None
+    assert called is False  # never dispatched the actual fetch
+
+
+@pytest.mark.asyncio
+async def test_fetch_selector_throttles_same_host(
+    monkeypatch: pytest.MonkeyPatch,
+    allow_all_robots: None,
+) -> None:
+    """Two fetch_selector calls to the same host go through politeness.throttle
+    — the bug this closes is adaptive scrapers skipping rate limiting
+    entirely by calling fetch_selector directly instead of polite_get."""
+    fetcher.configure(FetchConfig())
+    monkeypatch.setattr(fetcher, "is_active", lambda: True)
+
+    class _FakePage:
+        status = 200
+        html_content = "<p>ok</p>"
+
+    async def _fake_raw(*_a: object, **_k: object) -> tuple[object, str, str]:
+        return _FakePage(), "plain", ""
+
+    monkeypatch.setattr(fetcher, "_fetch_raw", _fake_raw)
+
+    throttle_calls: list[str] = []
+    real_throttle = politeness.throttle
+
+    async def _spy_throttle(url: str, min_interval: float) -> None:
+        throttle_calls.append(url)
+        await real_throttle(url, min_interval)
+
+    monkeypatch.setattr(politeness, "throttle", _spy_throttle)
+
+    try:
+        await fetcher.fetch_selector("https://jobbank.gc.ca/a", source="jobbank")
+        await fetcher.fetch_selector("https://jobbank.gc.ca/b", source="jobbank")
+    finally:
+        fetcher.reset()
+
+    assert len(throttle_calls) == 2

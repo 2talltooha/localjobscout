@@ -4,11 +4,8 @@ import asyncio
 import json
 import logging
 import os
-import time
 from dataclasses import dataclass
 from typing import Any, cast
-
-import schedule
 
 from localjobscout import db, matcher, notifier, prefilter, resume
 from localjobscout.alerts import AlertSender, EmailAlertSender
@@ -53,7 +50,18 @@ class ScanResult:
     resumes_tailored: int = 0  # tailored resumes built for top matches
 
 
-def _make_scrapers(settings: Settings) -> list[Scraper]:
+def _make_scrapers(
+    settings: Settings, known_ids: frozenset[str] = frozenset()
+) -> list[Scraper]:
+    """Build this scan's scraper instances.
+
+    ``known_ids`` (job ids already in the DB) is threaded into every
+    adaptive-selector scraper so it can skip re-fetching a detail page for a
+    job it already has a stored description for — the JSON-API (adzuna,
+    remoteok, uwaterloo) and Playwright (linkedin, indeed) scrapers don't take
+    it since they either don't fetch per-job detail pages this way or are out
+    of scope for the adaptive-selector work.
+    """
     scrapers: list[Scraper] = []
     # Query-capable general boards fan out one instance per category query
     # (settings.queries_for → enabled-category queries, else the board's own
@@ -64,6 +72,7 @@ def _make_scrapers(settings: Settings) -> list[Scraper]:
                 JobBankScraper(
                     max_pages=settings.scrapers.jobbank.max_pages,
                     query=q,
+                    known_ids=known_ids,
                 )
             )
     if settings.scrapers.remoteok.enabled:
@@ -97,7 +106,12 @@ def _make_scrapers(settings: Settings) -> list[Scraper]:
                 )
             )
     if settings.scrapers.uoguelph.enabled:
-        scrapers.append(UofGScraper(max_pages=settings.scrapers.uoguelph.max_pages))
+        scrapers.append(
+            UofGScraper(
+                max_pages=settings.scrapers.uoguelph.max_pages,
+                known_ids=known_ids,
+            )
+        )
     if settings.scrapers.uwaterloo.enabled:
         scrapers.append(
             UWaterlooScraper(
@@ -107,29 +121,45 @@ def _make_scrapers(settings: Settings) -> list[Scraper]:
         )
     if settings.scrapers.conestoga.enabled:
         scrapers.append(
-            ConestogaScraper(max_pages=settings.scrapers.conestoga.max_pages)
+            ConestogaScraper(
+                max_pages=settings.scrapers.conestoga.max_pages,
+                known_ids=known_ids,
+            )
         )
     if settings.scrapers.laurier.enabled:
         scrapers.append(
-            LaurierScraper(max_pages=settings.scrapers.laurier.max_pages)
+            LaurierScraper(
+                max_pages=settings.scrapers.laurier.max_pages,
+                known_ids=known_ids,
+            )
         )
     if settings.scrapers.hamiltonhealth.enabled:
         scrapers.append(
             HamiltonHealthScraper(
-                max_pages=settings.scrapers.hamiltonhealth.max_pages
+                max_pages=settings.scrapers.hamiltonhealth.max_pages,
+                known_ids=known_ids,
             )
         )
     if settings.scrapers.grandriver.enabled:
         scrapers.append(
-            GrandRiverScraper(max_pages=settings.scrapers.grandriver.max_pages)
+            GrandRiverScraper(
+                max_pages=settings.scrapers.grandriver.max_pages,
+                known_ids=known_ids,
+            )
         )
     if settings.scrapers.stmarys.enabled:
         scrapers.append(
-            StMarysScraper(max_pages=settings.scrapers.stmarys.max_pages)
+            StMarysScraper(
+                max_pages=settings.scrapers.stmarys.max_pages,
+                known_ids=known_ids,
+            )
         )
     if settings.scrapers.cambridge.enabled:
         scrapers.append(
-            CambridgeScraper(max_pages=settings.scrapers.cambridge.max_pages)
+            CambridgeScraper(
+                max_pages=settings.scrapers.cambridge.max_pages,
+                known_ids=known_ids,
+            )
         )
     for site in settings.scrapers.icims_sites:
         if site.enabled:
@@ -140,6 +170,7 @@ def _make_scrapers(settings: Settings) -> list[Scraper]:
                     company=site.company,
                     city=site.city,
                     max_pages=site.max_pages,
+                    known_ids=known_ids,
                 )
             )
     if settings.scrapers.talent.enabled:
@@ -154,6 +185,7 @@ def _make_scrapers(settings: Settings) -> list[Scraper]:
                     query=q or "healthcare",
                     max_pages=settings.scrapers.talent.max_pages,
                     location=talent_loc,
+                    known_ids=known_ids,
                 )
             )
     return scrapers
@@ -329,15 +361,32 @@ async def run_scan(settings: Settings) -> ScanResult:
         # the built-in httpx/Playwright path when disabled or not installed).
         fetcher.configure(settings.fetch)
 
-        scrapers = _make_scrapers(settings)
+        # One query for every job id already in the DB — the adaptive
+        # scrapers skip re-fetching a detail page for jobs they already have
+        # a stored description for, instead of re-downloading ~100 pages of
+        # already-known postings every single hourly scan.
+        known_ids = frozenset(db.get_all_job_ids())
+        scrapers = _make_scrapers(settings, known_ids)
         scrapers_run = len(scrapers)
         errors = 0
         all_jobs: list[Job] = []
 
+        # Cap concurrent scraper.fetch() calls — category queries fan out
+        # multiple instances of the same board (e.g. up to max_intake_queries
+        # JobBank/LinkedIn/Indeed instances), which without a cap meant that
+        # many concurrent Playwright browsers and simultaneous hits on one
+        # host at once. Per-host request spacing is still handled by
+        # scrapers.politeness regardless of this cap.
+        sem = asyncio.Semaphore(max(1, settings.fetch.max_concurrent_scrapers))
+
+        async def _bounded_fetch(s: Scraper) -> list[Job]:
+            async with sem:
+                return await s.fetch(settings.location)
+
         raw = cast(
             list[list[Job] | BaseException],
             await asyncio.gather(
-                *[s.fetch(settings.location) for s in scrapers],
+                *[_bounded_fetch(s) for s in scrapers],
                 return_exceptions=True,
             ),
         )
@@ -355,34 +404,48 @@ async def run_scan(settings: Settings) -> ScanResult:
 
         jobs_seen = len(all_jobs)
 
+        # One query for every known hash instead of one round trip per job —
+        # also tracks hashes added within this batch so two jobs from
+        # different sources that collide with each other (not just with an
+        # existing DB row) are still caught.
+        known_hashes = db.get_all_job_hashes()
         cross_dupes = 0
-        new_jobs: list[Job] = []
+        to_upsert: list[Job] = []
         for job in all_jobs:
-            if job.job_hash and db.hash_exists_in_db(job.job_hash):
+            if job.job_hash and job.job_hash in known_hashes:
                 cross_dupes += 1
                 continue
-            if db.upsert_job(job):
-                new_jobs.append(job)
+            to_upsert.append(job)
+            if job.job_hash:
+                known_hashes.add(job.job_hash)
+        is_new_flags = db.upsert_jobs(to_upsert)
+        new_jobs = [
+            job for job, is_new in zip(to_upsert, is_new_flags, strict=True)
+            if is_new
+        ]
         jobs_new = len(new_jobs)
         if cross_dupes:
             log.debug("Cross-source dedup removed %d duplicate(s)", cross_dupes)
 
         jobs_excluded = 0
         scoreable_jobs: list[Job] = []
+        excluded_ids: list[str] = []
         for job in new_jobs:
             excluded, reason = prefilter.should_exclude(job, settings.prefilter)
             if excluded:
                 log.info("Excluded %r: %s", job.title, reason)
-                db.update_score(job.id, -1.0)
+                excluded_ids.append(job.id)
                 jobs_excluded += 1
             else:
                 scoreable_jobs.append(job)
+        if excluded_ids:
+            db.update_scores([(job_id, -1.0) for job_id in excluded_ids])
 
         if scoreable_jobs:
             scored = job_matcher.score_jobs(resume_text, scoreable_jobs)
             for job, score in scored:
                 job.score = score
-                db.update_score(job.id, score)
+            db.update_scores([(job.id, score) for job, score in scored])
 
         # Inline suitability scoring for top new jobs above threshold
         from localjobscout.llm_backend import use_cli
@@ -405,14 +468,9 @@ async def run_scan(settings: Settings) -> ScanResult:
             from localjobscout.cowork_export import export_to_cowork_queue
 
             thr = settings.cowork.min_score or settings.effective_threshold()
-            cowork_candidates = [
-                j for j in db.get_recent_jobs(limit=None)
-                if (j.score or 0.0) >= thr
-                and (
-                    not settings.cowork.gate_qualified
-                    or j.qualification_verdict != "no"
-                )
-            ]
+            cowork_candidates = db.get_cowork_candidates(
+                thr, gate_qualified=settings.cowork.gate_qualified
+            )
             n_cowork = export_to_cowork_queue(
                 cowork_candidates, settings.cowork.queue_dir
             )
@@ -475,29 +533,23 @@ async def run_scan(settings: Settings) -> ScanResult:
         )
 
 
-def run_forever(settings: Settings) -> None:
+async def _run_forever_loop(settings: Settings, console: Any) -> None:
+    """One scan, then sleep the full interval, forever.
+
+    Plain asyncio instead of the ``schedule`` lib's wall-clock tick + 30s
+    poll loop: no drift from a slow scan eating into the next tick, no
+    dependency on a separate scheduling library, and the interval is exact
+    (measured from scan completion, not scan start, so scans never overlap).
+    """
     from datetime import datetime as _dt
 
-    from rich.console import Console
-    from rich.panel import Panel
+    interval_seconds = settings.scan_interval_minutes * 60
 
-    console = Console()
-    console.print(
-        Panel(
-            f"[bold cyan]LocalJobScout[/bold cyan] — scanning every "
-            f"[bold]{settings.scan_interval_minutes}[/bold] min\n"
-            f"[dim]Sources: jobbank · adzuna · linkedin · indeed · remoteok · "
-            f"uoguelph · uwaterloo · conestoga · laurier · "
-            f"grandriver · stmarys · cambridge · hamiltonhealth[/dim]",
-            border_style="cyan",
-        )
-    )
-
-    def _job() -> None:
+    while True:
         with console.status(
             "[cyan]Scanning job boards…[/cyan]", spinner="dots"
         ):
-            result = asyncio.run(run_scan(settings))
+            result = await run_scan(settings)
         _print_scan_panel(console, result)
         try:
             from localjobscout.export import write_matches_md
@@ -510,14 +562,26 @@ def run_forever(settings: Settings) -> None:
             f"[dim]Next scan in {settings.scan_interval_minutes} min "
             f"(started at {next_run})[/dim]\n"
         )
+        await asyncio.sleep(interval_seconds)
 
-    schedule.every(settings.scan_interval_minutes).minutes.do(_job)
-    _job()
+
+def run_forever(settings: Settings) -> None:
+    from rich.console import Console
+    from rich.panel import Panel
+
+    console = Console()
+    source_names = sorted({s.name for s in _make_scrapers(settings)})
+    console.print(
+        Panel(
+            f"[bold cyan]LocalJobScout[/bold cyan] — scanning every "
+            f"[bold]{settings.scan_interval_minutes}[/bold] min\n"
+            f"[dim]Sources: {' · '.join(source_names)}[/dim]",
+            border_style="cyan",
+        )
+    )
 
     try:
-        while True:
-            schedule.run_pending()
-            time.sleep(30)
+        asyncio.run(_run_forever_loop(settings, console))
     except KeyboardInterrupt:
         log.info("Scheduler stopped by user")
 

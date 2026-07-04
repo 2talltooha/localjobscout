@@ -76,8 +76,11 @@ def extract_description_adaptive(selector: Any) -> str:
 class StMarysScraper(Scraper):
     name = "stmarys"
 
-    def __init__(self, max_pages: int = 2) -> None:
+    def __init__(
+        self, max_pages: int = 2, known_ids: frozenset[str] = frozenset()
+    ) -> None:
         self._max_pages = max_pages
+        self._known_ids = known_ids
 
     async def fetch(self, location: str) -> list[Job]:
         if fetcher.adaptive_enabled():
@@ -106,19 +109,21 @@ class StMarysScraper(Scraper):
             for item in items:
                 if len(jobs) >= _MAX_LISTINGS:
                     break
+                job_id = make_job_id("stmarys", item["href"])
                 description = "Location: Kitchener, ON"
                 if item["department"]:
                     description = f"Department: {item['department']}\n{description}"
-                detail_sel = await fetcher.fetch_selector(
-                    item["href"], source="stmarys"
-                )
-                if detail_sel is not None:
-                    body = extract_description_adaptive(detail_sel)
-                    if body:
-                        description = body
+                if job_id not in self._known_ids:
+                    detail_sel = await fetcher.fetch_selector(
+                        item["href"], source="stmarys"
+                    )
+                    if detail_sel is not None:
+                        body = extract_description_adaptive(detail_sel)
+                        if body:
+                            description = body
                 jobs.append(
                     Job(
-                        id=make_job_id("stmarys", item["href"]),
+                        id=job_id,
                         source="stmarys",
                         title=item["title"],
                         company="St. Mary's General Hospital",

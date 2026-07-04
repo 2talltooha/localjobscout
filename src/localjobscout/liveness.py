@@ -26,6 +26,8 @@ from dataclasses import dataclass
 
 import httpx
 
+from localjobscout.scrapers.base import CHROME_UA
+
 logger = logging.getLogger(__name__)
 
 # Phrases that, on a verifiable source, mean the posting is closed/gone.
@@ -62,12 +64,7 @@ _UNVERIFIABLE_SOURCES: frozenset[str] = frozenset({"indeed"})
 def _is_verifiable(source: str) -> bool:
     return source in _VERIFIABLE_SOURCES or source.endswith("_icims")
 
-_UA = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-    )
-}
+_UA = {"User-Agent": CHROME_UA}
 
 
 @dataclass(frozen=True)

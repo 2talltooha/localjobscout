@@ -10,7 +10,7 @@ from bs4 import BeautifulSoup, Tag
 
 from localjobscout.db import Job, make_job_id
 from localjobscout.scrapers import fetcher
-from localjobscout.scrapers.adaptive import all_matches, first
+from localjobscout.scrapers.adaptive import all_matches, first, taleo_description
 from localjobscout.scrapers.base import USER_AGENT, Scraper, polite_get
 
 logger = logging.getLogger(__name__)
@@ -59,23 +59,17 @@ def extract_rows_adaptive(selector: Any) -> list[dict[str, str]]:
 
 
 def extract_description_adaptive(selector: Any) -> str:
-    el = first(
-        selector,
-        'span[itemprop="description"] span.jobdescription',
-        identifier="laurier_job_desc",
-    )
-    if el is None:
-        el = first(selector, "span.jobdescription")
-    if el is None:
-        return ""
-    return " ".join(el.get_all_text().split()).strip()
+    return taleo_description(selector, "laurier_job_desc")
 
 
 class LaurierScraper(Scraper):
     name = "laurier"
 
-    def __init__(self, max_pages: int = 3) -> None:
+    def __init__(
+        self, max_pages: int = 3, known_ids: frozenset[str] = frozenset()
+    ) -> None:
         self._max_pages = max_pages
+        self._known_ids = known_ids
 
     async def fetch(self, location: str) -> list[Job]:
         if fetcher.adaptive_enabled():
@@ -113,22 +107,24 @@ class LaurierScraper(Scraper):
                     if detail_url in seen_urls:
                         continue
                     seen_urls.add(detail_url)
+                    job_id = make_job_id("laurier", detail_url)
                     description_parts: list[str] = []
                     if row["facility"]:
                         description_parts.append(f"Department: {row['facility']}")
                     if row["location"]:
                         description_parts.append(f"Location: {row['location']}")
                     description = "\n".join(description_parts)
-                    detail_sel = await fetcher.fetch_selector(
-                        detail_url, source="laurier"
-                    )
-                    if detail_sel is not None:
-                        body = extract_description_adaptive(detail_sel)
-                        if body:
-                            description = body
+                    if job_id not in self._known_ids:
+                        detail_sel = await fetcher.fetch_selector(
+                            detail_url, source="laurier"
+                        )
+                        if detail_sel is not None:
+                            body = extract_description_adaptive(detail_sel)
+                            if body:
+                                description = body
                     jobs.append(
                         Job(
-                            id=make_job_id("laurier", detail_url),
+                            id=job_id,
                             source="laurier",
                             title=row["title"],
                             company="Wilfrid Laurier University",

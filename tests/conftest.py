@@ -9,8 +9,8 @@ import httpx
 import pytest
 from respx.mocks import HTTPCoreMocker
 
-from localjobscout.scrapers import base as scraper_base
 from localjobscout.scrapers import fetcher as scraper_fetcher
+from localjobscout.scrapers import politeness
 
 
 def _respx_is_active() -> bool:
@@ -83,7 +83,7 @@ def block_real_network() -> Generator[None, None, None]:
 
 @pytest.fixture(autouse=True)
 def reset_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    scraper_base._robots_cache.clear()
+    politeness.reset()
     # Ensure the Scrapling fetch adapter is inactive in unit tests so
     # polite_get uses the httpx path that respx mocks. run_scan() configures
     # it in production; without this reset that global state would leak across

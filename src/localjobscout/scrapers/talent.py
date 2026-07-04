@@ -93,11 +93,16 @@ class TalentScraper(Scraper):
     name = "talent"
 
     def __init__(
-        self, query: str = "healthcare", max_pages: int = 3, location: str = ""
+        self,
+        query: str = "healthcare",
+        max_pages: int = 3,
+        location: str = "",
+        known_ids: frozenset[str] = frozenset(),
     ) -> None:
         self._query = query or "healthcare"
         self._max_pages = max_pages
         self._location_override = location
+        self._known_ids = known_ids
 
     async def fetch(self, location: str) -> list[Job]:
         if fetcher.adaptive_enabled():
@@ -150,6 +155,8 @@ class TalentScraper(Scraper):
                 )
 
         for job in jobs[:_MAX_ENRICH]:
+            if job.id in self._known_ids:
+                continue
             detail_sel = await fetcher.fetch_selector(job.url, source="talent")
             if detail_sel is None:
                 continue

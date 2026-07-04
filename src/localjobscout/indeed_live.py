@@ -21,13 +21,10 @@ import asyncio
 import logging
 
 from localjobscout.liveness import Liveness
+from localjobscout.scrapers.base import CHROME_UA as _UA
 
 logger = logging.getLogger(__name__)
 
-_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-)
 _APPLY_SEL = (
     "#indeedApplyButton, .jobsearch-IndeedApplyButton, "
     "button:has-text('Apply now'), a:has-text('Apply on company site'), "

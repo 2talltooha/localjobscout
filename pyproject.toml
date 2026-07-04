@@ -19,7 +19,6 @@ dependencies = [
     "pydantic-settings~=2.4",
     "pyyaml~=6.0",
     "python-dotenv~=1.0",
-    "schedule~=1.2",
     "plyer~=2.1",
     "rich~=13.7",
     "playwright-stealth~=2.0",
@@ -88,11 +87,6 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 # dbus is an optional Linux-only package; conditionally imported at runtime.
 module = ["dbus"]
-ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-# schedule ships no py.typed marker or bundled stubs.
-module = ["schedule"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
